@@ -1,0 +1,22 @@
+{
+  "session_id": "richard_bad",
+  "ocean_scores": {
+    "openness": 70.4,
+    "conscientiousness": 2.4,
+    "extraversion": 18.6,
+    "agreeableness": 40.4,
+    "neuroticism": 91.0
+  },
+  "trait_interpretations": {
+    "openness": "Creative thinker — brings novel ideas and explores problems from multiple angles.",
+    "conscientiousness": "Tends toward spontaneity; may struggle with deadlines and detail.",
+    "extraversion": "Reserved and measured; may need encouragement to speak up.",
+    "agreeableness": "Balances collaboration with assertiveness.",
+    "neuroticism": "Shows signs of stress reactivity — may struggle under interview pressure."
+  },
+  "job_fit_score": 14.62,
+  "success_prediction": "Low",
+  "role_recommendation": "This candidate does not fit the role well, as their Job Fit Score of 14.6/100 is significantly below the expected level for the position, suggesting a mismatch in key skills and experience. Their single strongest trait is high innovation (N=91.0), which could be beneficial for solving complex problems, but their weakest trait is conscientiousness (C=2.4), which may impact their ability to deliver reliable and efficient work, especially in leadership roles requiring strong organizational skills.",
+  "questions_scored": 6,
+  "questions_skipped": 3
+}
