@@ -1,0 +1,107 @@
+# AI Interviewer Production Specification
+
+This document provides an A-Z technical blueprint for building a production-grade AI Interviewer system for candidate screening.
+
+## 1. System Architecture & Tech Stack
+
+The system follows a micro-service architecture to handle high-compute ML tasks asynchronously.
+
+### 1.1 Core Components
+| Layer | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Document Parsing** | [IBM Docling](https://github.com/DS4SD/docling) | High-fidelity PDF/Resume parsing into Markdown/JSON. |
+| **Orchestration LLM** | Ollama (Qwen2.5-72B / DeepSeek-R1) | Question generation, Logical scoring, Interview flow control. |
+| **Speech Processing** | faster-whisper (Large-v3) | Real-time Speech-to-Text (STT) with timestamps. |
+| **Vision Pipeline** | MediaPipe + GazeFollower | Eye tracking, pupil dilation, and facial landmarking. |
+| **Physiological Sensing** | rPPG-Toolbox (Open-CV + JAX) | Non-contact Heart Rate Variability (HRV) estimation via webcam. |
+| **Backend** | Python (FastAPI) + WebSockets | Low-latency streaming for audio/video features. |
+| **Frontend** | Next.js 14 + Vanilla CSS | Modern, premium UI with real-time feedback loops. |
+| **Data Orchestration** | Redis + PostgreSQL | Handling session states and storing multimodal reports. |
+
+---
+
+## 2. ML Models: Training & Data Specs
+
+### 2.1 The Interviewer (LLM)
+*   **Base Model**: Qwen2.5-72B (or 7B for lower latency).
+*   **File Format**: GGUF (Quantized 4-bit/8-bit for Ollama).
+*   **Training/Fine-tuning**: 
+    - **Method**: QLoRA fine-tuning on `Synthetic 100k+ Job Postings` and `Mock Interview Transcripts`.
+    - **Goal**: Adopt a professional recruiter persona, generate context-aware scenarios (60-90s answer windows).
+*   **Prompt Engineering**: Few-shot prompting for specific question types (Logical, Behavioral, Situational).
+
+### 2.2 Emotional & Personality Analyzer
+*   **Model**: Late-Fusion Transformer (Custom).
+*   **purpose**: Fuses Text (Whisper), Audio (Prosody), and Video (Facial) signals.
+*   **Training Set**: 
+    - **ChaLearn First Impressions**: For Big-Five (OCEAN) labels.
+    - **MELD**: For emotion classification (8 classes).
+    - **ForDigitStress**: For stress-specific signals (HRV + Pupil).
+*   **File Format**: PyTorch Safetensors / ONNX (for cross-platform inference).
+
+### 2.3 Eye Tracking & Cheating Detection
+*   **Model**: MobileNetV2-based GazeFollower.
+*   **Training Data**: MPIIGaze / LPW (Learning by Looking) datasets.
+*   - **Features**: Detects gaze-off-screen, strategic focus vs. nervous wandering.
+*   **Weightage Logic**: High gaze wandering + scripted wording = High Cheating Probability.
+
+---
+
+## 3. High-Level Interview Flow
+
+1.  **Phase 1: Ingestion**: Candidate uploads PDF. IBM Docling extracts skills, experience, and projects.
+2.  **Phase 2: Intro & Calibration**: 
+    - Professional AI Video Intro.
+    - Camera/Mic test + **Gaze Calibration** (Follow the dot).
+    - **HRV Baseline**: Candidate sits still for 10 seconds to establish "calm" heart rate.
+3.  **Phase 3: Time-Sequenced Questioning**: 
+    - **T=0s**: Warm-up. 
+    - **T=5m**: Logical/Technical based on resume.
+    - **T=10m**: High-pressure behavioral scenarios.
+4.  **Phase 4: Synthesis**: Multi-modal data fuzed into a "Digital Candidate Twin".
+
+---
+
+## 4. Admin Dashboard (Digital Candidate Twin)
+
+A premium dashboard showing:
+*   **Job-Fit Score**: 0-100% (trained on past success data).
+*   **OCEAN Slider Graphs**: Real-time trait breakdown.
+*   **Authenticity Baseline**: Visual flag for robotic speech or eye-wandering.
+*   **Cognitive Load Curve**: Visualization of HRV vs. Question difficulty.
+*   **Full Video Replay**: With synchronized AI insight overlays.
+
+---
+
+## 5. Production Folder Structure
+
+```text
+/ai-interviewer
+├── /apps
+│   ├── /frontend (Next.js)
+│   └── /admin-dashboard (React/Streamlit)
+├── /services
+│   ├── /parser (Docling service)
+│   ├── /llm-host (Ollama instance + Modelfiles)
+│   ├── /vision-engine (MediaPipe + rPPG)
+│   └── /stt-engine (Whisper-v3)
+├── /models
+│   ├── /gguf (Qwen adapters)
+│   └── /fusion (Transformers weights)
+├── /data
+│   └── /training_scripts (LoRA/QLoRA configs)
+└── docker-compose.yml
+```
+
+---
+
+## 6. Verification Plan
+
+### Automated
+- **Latency Benchmark**: Ensure STT -> LLM -> Response loop is < 1.5s.
+- **Parser Accuracy**: 95%+ field extraction on complex LaTeX/Multi-column PDFs.
+- **Model Bias Check**: Test across 10+ demographic profiles for fairness.
+
+### Manual
+- **Stress Test**: Perform mock interviews with intentional cheating (reading from side-screen) to verify detection triggers.
+- **UI UX Review**: Ensure "Warning Signs" (No face detected, Low lighting) are non-obstructive but clear.
