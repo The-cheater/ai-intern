@@ -1,56 +1,69 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Camera,
     Mic,
     CheckCircle2,
-    XCircle,
     ShieldAlert,
-    Volume2,
-    Scan,
     AlertTriangle,
     ArrowRight,
-    Maximize
+    XCircle,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+type PermState = "idle" | "granted" | "denied";
+
 export default function PermissionGate() {
-    const [cameraOk, setCameraOk] = useState(false);
-    const [micOk, setMicOk] = useState(false);
-    const [isReady, setIsReady] = useState(false);
+    const [cameraState, setCameraState] = useState<PermState>("idle");
+    const [micState,    setMicState]    = useState<PermState>("idle");
+    const [errorMsg,    setErrorMsg]    = useState<string>("");
     const router = useRouter();
-    const visualizerRef = useRef<HTMLDivElement>(null);
 
-    // Simulate permission granting
+    // Request real camera + mic permissions on mount
     useEffect(() => {
-        const timer1 = setTimeout(() => setCameraOk(true), 1500);
-        const timer2 = setTimeout(() => setMicOk(true), 2500);
-
-        return () => {
-            clearTimeout(timer1);
-            clearTimeout(timer2);
-        };
+        (async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                setCameraState("granted");
+                setMicState("granted");
+                // Stop the test stream immediately — interview page will open its own
+                stream.getTracks().forEach(t => t.stop());
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (msg.toLowerCase().includes("permission") || msg.toLowerCase().includes("denied")) {
+                    setCameraState("denied");
+                    setMicState("denied");
+                    setErrorMsg("Camera and microphone access were denied. Please allow access in your browser settings and reload.");
+                } else {
+                    setCameraState("denied");
+                    setMicState("denied");
+                    setErrorMsg(`Device error: ${msg}`);
+                }
+            }
+        })();
     }, []);
 
-    useEffect(() => {
-        if (cameraOk && micOk) setIsReady(true);
-    }, [cameraOk, micOk]);
+    const isReady = cameraState === "granted" && micState === "granted";
 
     const handleStart = () => {
-        // In a real app, we would request Fullscreen here
         if (document.documentElement.requestFullscreen) {
             document.documentElement.requestFullscreen().catch(e => {
-                console.error("Error attempting to enable full-screen mode:", e);
+                console.error("Fullscreen error:", e);
             });
         }
-        router.push("/portal/interview");
+        router.push("/portal/calibration");
+    };
+
+    const StateIcon = ({ state }: { state: PermState }) => {
+        if (state === "granted") return <CheckCircle2 size={32} className="text-emerald-400" />;
+        if (state === "denied")  return <XCircle      size={32} className="text-danger" />;
+        return <div className="w-8 h-8 border-2 border-slate-700 border-t-primary rounded-full animate-spin" />;
     };
 
     return (
         <div className="min-h-screen bg-[#0F1117] flex flex-col items-center justify-center p-6 space-y-12 overflow-hidden relative">
-            {/* Background Calmness */}
             <div className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-20">
                 <div className="absolute top-[30%] left-[30%] w-[40%] h-[40%] bg-violet-600/10 blur-[150px] rounded-full animate-pulse" />
                 <div className="absolute bottom-[30%] right-[30%] w-[30%] h-[30%] bg-emerald-500/5 blur-[120px] rounded-full" />
@@ -63,21 +76,40 @@ export default function PermissionGate() {
             >
                 <div className="text-center mb-16">
                     <h1 className="font-heading text-6xl font-black mb-4 tracking-tighter">Secure Initialization</h1>
-                    <p className="font-body text-slate-500 text-xl italic font-medium">Verify your environment and grant necessary permissions to proceed.</p>
+                    <p className="font-body text-slate-500 text-xl italic font-medium">
+                        Verify your environment and grant necessary permissions to proceed.
+                    </p>
                 </div>
 
+                <AnimatePresence>
+                    {errorMsg && (
+                        <motion.div
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="flex items-center gap-3 bg-danger/10 border border-danger/30 text-danger px-6 py-4 rounded-2xl mb-8"
+                        >
+                            <AlertTriangle size={20} className="flex-shrink-0" />
+                            <p className="font-ui text-sm font-bold">{errorMsg}</p>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-16">
-                    {/* Camera Permission */}
-                    <div className={`p-10 rounded-[2.5rem] border border-white/5 bg-slate-900 shadow-2xl transition-all ${cameraOk ? "bg-emerald-500/5 border-emerald-500/20" : "bg-slate-900 border-white/5"}`}>
+                    {/* Camera */}
+                    <div className={`p-10 rounded-[2.5rem] border shadow-2xl transition-all ${
+                        cameraState === "granted" ? "bg-emerald-500/5 border-emerald-500/20"
+                        : cameraState === "denied" ? "bg-danger/5 border-danger/20"
+                        : "bg-slate-900 border-white/5"
+                    }`}>
                         <div className="flex items-center justify-between mb-8">
-                            <div className={`p-4 rounded-3xl ${cameraOk ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-800 text-slate-500"}`}>
+                            <div className={`p-4 rounded-3xl ${
+                                cameraState === "granted" ? "bg-emerald-500/20 text-emerald-400"
+                                : cameraState === "denied" ? "bg-danger/20 text-danger"
+                                : "bg-slate-800 text-slate-500"
+                            }`}>
                                 <Camera size={32} strokeWidth={1.5} />
                             </div>
-                            {cameraOk ? (
-                                <CheckCircle2 size={32} className="text-emerald-400 animate-in zoom-in duration-500" />
-                            ) : (
-                                <div className="w-8 h-8 border-2 border-slate-700 border-t-primary rounded-full animate-spin" />
-                            )}
+                            <StateIcon state={cameraState} />
                         </div>
                         <h3 className="font-heading text-2xl font-bold mb-2">Camera Assessment</h3>
                         <p className="font-body text-slate-500 text-sm italic leading-relaxed">
@@ -85,49 +117,34 @@ export default function PermissionGate() {
                         </p>
                     </div>
 
-                    {/* Microhpone Permission */}
-                    <div className={`p-10 rounded-[2.5rem] border border-white/5 bg-slate-900 shadow-2xl transition-all ${micOk ? "bg-emerald-500/5 border-emerald-500/20" : "bg-slate-900 border-white/5"}`}>
+                    {/* Microphone */}
+                    <div className={`p-10 rounded-[2.5rem] border shadow-2xl transition-all ${
+                        micState === "granted" ? "bg-emerald-500/5 border-emerald-500/20"
+                        : micState === "denied" ? "bg-danger/5 border-danger/20"
+                        : "bg-slate-900 border-white/5"
+                    }`}>
                         <div className="flex items-center justify-between mb-8">
-                            <div className={`p-4 rounded-3xl ${micOk ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-800 text-slate-500"}`}>
+                            <div className={`p-4 rounded-3xl ${
+                                micState === "granted" ? "bg-emerald-500/20 text-emerald-400"
+                                : micState === "denied" ? "bg-danger/20 text-danger"
+                                : "bg-slate-800 text-slate-500"
+                            }`}>
                                 <Mic size={32} strokeWidth={1.5} />
                             </div>
-                            {micOk ? (
-                                <CheckCircle2 size={32} className="text-emerald-400 animate-in zoom-in duration-500" />
-                            ) : (
-                                <div className="w-8 h-8 border-2 border-slate-700 border-t-primary rounded-full animate-spin" />
-                            )}
+                            <StateIcon state={micState} />
                         </div>
                         <h3 className="font-heading text-2xl font-bold mb-2">Voice Calibration</h3>
-                        <p className="font-body text-slate-500 text-sm italic leading-relaxed mb-6">
+                        <p className="font-body text-slate-500 text-sm italic leading-relaxed">
                             Analyzing vocal tonality and polarity stability in real-time. Speak briefly to test sensitivity.
                         </p>
-
-                        {/* Audio Waveform Visualizer */}
-                        <div className="h-12 flex items-center gap-1">
-                            {Array.from({ length: 40 }).map((_, i) => (
-                                <motion.div
-                                    key={i}
-                                    animate={{
-                                        height: micOk ? [8, Math.random() * 40 + 8, 8] : 8,
-                                        opacity: micOk ? [0.2, 0.8, 0.2] : 0.2
-                                    }}
-                                    transition={{
-                                        duration: Math.random() * 0.5 + 0.3,
-                                        repeat: Infinity,
-                                        ease: "easeInOut"
-                                    }}
-                                    className="w-[2px] bg-emerald-400 rounded-full"
-                                />
-                            ))}
-                        </div>
                     </div>
                 </div>
 
-                {/* Fullscreen Warning Banner */}
+                {/* Fullscreen Warning */}
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 1.5 }}
+                    transition={{ delay: 0.4 }}
                     className="bg-danger/10 border border-danger/30 rounded-[2rem] p-8 flex flex-col md:flex-row gap-6 items-center shadow-2xl mb-12 relative group overflow-hidden"
                 >
                     <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none group-hover:opacity-10 transition-opacity">
@@ -149,13 +166,13 @@ export default function PermissionGate() {
                         onClick={handleStart}
                         disabled={!isReady}
                         className={`group relative px-12 py-6 rounded-2xl font-heading text-2xl font-black transition-all shadow-2xl flex items-center gap-6 overflow-hidden ${isReady
-                                ? "bg-primary text-white scale-100 hover:scale-105 active:scale-[0.98] shadow-violet-active"
-                                : "bg-slate-900 text-slate-600 border border-white/5 opacity-50 cursor-not-allowed"
-                            }`}
+                            ? "bg-primary text-white scale-100 hover:scale-105 active:scale-[0.98] shadow-violet-active"
+                            : "bg-slate-900 text-slate-600 border border-white/5 opacity-50 cursor-not-allowed"
+                        }`}
                     >
                         {isReady && <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-shimmer" />}
                         <span className="relative z-10 flex items-center gap-4">
-                            I'm Ready — Begin Interview
+                            I&apos;m Ready — Begin Calibration
                             <ArrowRight size={24} className="group-hover:translate-x-2 transition-transform" />
                         </span>
                     </button>
