@@ -22,10 +22,12 @@ mediapipe>=0.10.0
 opencv-python-headless>=4.9.0
 deepface>=0.0.93
 
-# ── Database — Google Drive ───────────────────────────────────────────────────
-google-auth>=2.29.0
-google-auth-oauthlib>=1.2.0
-google-api-python-client>=2.130.0
+# ── Storage — Cloudinary ──────────────────────────────────────────────────────
+cloudinary>=1.41.0
+
+# ── Optional: GazeFollower (server-side gaze model) ───────────────────────────
+# See: https://github.com/GanchengZhu/GazeFollower
+gazefollower>=1.0.2
 
 # ── Database — Supabase ───────────────────────────────────────────────────────
 supabase>=2.4.0

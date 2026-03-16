@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     candidate_name TEXT        NOT NULL,
     job_opening_id TEXT        NOT NULL,
     interviewer_id TEXT        NOT NULL,
-    login_id       TEXT        UNIQUE,                 -- NSC-XXXXXX shown to recruiter
+    login_id       TEXT        NOT NULL,               -- Opening login ID (shared per job_opening_id)
     questions      JSONB       NOT NULL DEFAULT '[]',  -- full InterviewScript questions
     job_description TEXT       NOT NULL DEFAULT '',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -19,12 +19,16 @@ CREATE INDEX IF NOT EXISTS idx_sessions_login_id ON sessions(login_id);
 
 -- ── Candidate one-time credentials ───────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS candidate_credentials (
-    login_id        TEXT        PRIMARY KEY,           -- NSC-XXXXXX
+    id              BIGSERIAL   PRIMARY KEY,
+    login_id        TEXT        NOT NULL,              -- shared opening login ID
     hashed_password TEXT        NOT NULL,
     session_id      TEXT        NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     used            BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cc_session ON candidate_credentials(session_id);
+CREATE INDEX IF NOT EXISTS idx_cc_login ON candidate_credentials(login_id);
 
 -- ── Question Responses ────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS question_responses (
@@ -45,10 +49,13 @@ CREATE TABLE IF NOT EXISTS question_responses (
     authenticity_score   FLOAT,
     video_file_id        TEXT,
     audio_file_id        TEXT,
+    video_url            TEXT,
+    audio_url            TEXT,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_qr_session ON question_responses(session_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qr_session_question ON question_responses(session_id, question_id);
 
 -- ── Video Signals ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS video_signals (
@@ -60,6 +67,7 @@ CREATE TABLE IF NOT EXISTS video_signals (
     emotion_distribution   JSONB       NOT NULL DEFAULT '{}',
     avg_hrv_rmssd          FLOAT       NOT NULL DEFAULT 0,
     hr_bpm                 FLOAT,
+    gaze_metrics           JSONB       NOT NULL DEFAULT '{}',
     stress_spike_detected  BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

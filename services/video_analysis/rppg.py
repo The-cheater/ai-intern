@@ -57,7 +57,7 @@ def analyze_rppg_from_video(video_path: str) -> Dict:
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _mean_face_rgb(frame: np.ndarray) -> np.ndarray | None:
+def _mean_face_rgb(frame: np.ndarray):  # -> Optional[np.ndarray]
     """Return mean [R, G, B] of the central face region."""
     h, w = frame.shape[:2]
     roi = frame[int(h * 0.2): int(h * 0.7), int(w * 0.2): int(w * 0.8)]

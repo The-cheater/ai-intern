@@ -10,15 +10,32 @@ from .prompts import SYSTEM_PROMPT, build_batch_prompt
 
 OLLAMA_URL    = os.getenv("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = "gemini-2.0-flash"
+GEMINI_URL     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-# Batch sizes kept small so the tiny model can reliably fill the schema
-_BATCHES = [
+# Default batch sizes — used when no section_counts are provided
+_DEFAULT_BATCHES = [
     ("intro",       3),
     ("technical",   4),
     ("technical",   3),
     ("behavioral",  4),
     ("logical",     4),
 ]
+
+_BATCH_MAX = 4   # max questions per LLM call
+
+
+def _build_batches(section_counts: dict) -> list:
+    """Build (stage, count) tuples from a section_counts dict, splitting large sections."""
+    batches = []
+    for stage, total in section_counts.items():
+        remaining = max(1, int(total))
+        while remaining > 0:
+            chunk = min(remaining, _BATCH_MAX)
+            batches.append((stage, chunk))
+            remaining -= chunk
+    return batches
 
 
 def _strip_fences(text: str) -> str:
@@ -104,6 +121,44 @@ def _call_ollama(
     raise RuntimeError("Unreachable")
 
 
+def _call_gemini(system: str, user: str, retries: int = 3) -> dict:
+    """Call Gemini Flash free API. Returns parsed JSON dict."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048},
+    }
+    for attempt in range(retries):
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                r = client.post(
+                    GEMINI_URL,
+                    params={"key": GEMINI_API_KEY},
+                    json=payload,
+                )
+                r.raise_for_status()
+                content = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return _extract_json(content)
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"Gemini call failed after {retries} attempts: {e}") from e
+    raise RuntimeError("Unreachable")
+
+
+def _call_llm(system: str, user: str, model: str, ollama_url: str) -> dict:
+    """Try Gemini Flash first; fall back to Ollama/Qwen on any failure."""
+    if GEMINI_API_KEY:
+        try:
+            return _call_gemini(system, user)
+        except Exception as e:
+            print(f"[VidyaAI][Generator] Gemini failed ({e}), falling back to Ollama")
+    return _call_ollama(system, user, model, ollama_url)
+
+
 def _coerce_question(raw: dict, stage: str, idx: int) -> Question:
     """Build a Question from raw dict, filling in missing fields with safe defaults."""
     ak_raw = raw.get("answer_key") or {}
@@ -128,12 +183,19 @@ def generate_questions(
     job_description: str = "",
     model: str = DEFAULT_MODEL,
     ollama_url: str = OLLAMA_URL,
+    section_counts=None,  # Optional[Dict[str, int]]
 ) -> InterviewScript:
-    """Generate 18 questions in small batches to keep the tiny model reliable."""
+    """Generate interview questions in small batches.
+
+    If *section_counts* is provided (e.g. {"intro": 2, "technical": 5, "behavioral": 3}),
+    it overrides the default batch configuration.
+    """
+    batches = _build_batches(section_counts) if section_counts else _DEFAULT_BATCHES
+
     all_questions: list[Question] = []
     q_idx = 1
 
-    for stage, count in _BATCHES:
+    for stage, count in batches:
         user_prompt = build_batch_prompt(
             stage=stage,
             count=count,
@@ -142,7 +204,7 @@ def generate_questions(
             job_snippet=job_description,
         )
         try:
-            data  = _call_ollama(SYSTEM_PROMPT, user_prompt, model, ollama_url)
+            data  = _call_llm(SYSTEM_PROMPT, user_prompt, model, ollama_url)
             raws  = data.get("questions") or []
             # accept dicts or nested lists
             for raw in raws[:count]:

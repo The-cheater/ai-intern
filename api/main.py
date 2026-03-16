@@ -7,21 +7,23 @@ All endpoints return structured JSON errors on failure:
 import json
 import os
 import random
+import shutil
 import string
 import tempfile
+import threading
 import time
 import uuid
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Path, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Path, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv()
 
-from services.database import drive_client, supabase_client
+from services.database import cloudinary_client, supabase_client
 from services.parser.models import ParsedResume
 from services.parser.parser import parse_pdf, parse_text
 from services.question_gen.generator import generate_questions
@@ -54,7 +56,28 @@ except ImportError:
     def _verify_pw(pw: str, h: str) -> bool: return _hash_pw(pw) == h
     print("[NeuroSync][Auth] bcrypt not found — using SHA-256 fallback")
 
-# ── Whisper (lazy) ─────────────────────────────────────────────────────────────
+# ── Per-session processing stage tracker ──────────────────────────────────────
+# Stores live pipeline stage for sessions currently being processed.
+# { session_id: {"stage": str, "label": str, "done": int, "total": int} }
+# Cleaned up when pipeline completes or on error.
+_processing_stages: Dict[str, Dict[str, Any]] = {}
+_stages_lock = threading.Lock()
+
+
+def _set_stage(session_id: str, stage: str, label: str, done: int = 0, total: int = 0) -> None:
+    with _stages_lock:
+        _processing_stages[session_id] = {"stage": stage, "label": label, "done": done, "total": total}
+    print(f"[VidyaAI][PostSession] [{session_id[:8]}] Stage: {stage} — {label} ({done}/{total})")
+
+
+def _clear_stage(session_id: str) -> None:
+    with _stages_lock:
+        _processing_stages.pop(session_id, None)
+
+
+# ── Whisper (lazy, serialised) ─────────────────────────────────────────────────
+_whisper_lock = threading.Lock()
+
 @lru_cache(maxsize=1)
 def _get_whisper():
     import whisper
@@ -87,42 +110,59 @@ def _err(message: str, code: str, status: int = 500):
 def _gen_login_id() -> str:
     return "NSC-" + "".join(random.choices(string.digits, k=6))
 
+def _gen_opening_login_id() -> str:
+    return "NSO-" + "".join(random.choices(string.digits, k=6))
+
 
 def _gen_password(length: int = 8) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(random.choices(chars, k=length))
 
 
-def _drive_upload_with_retry(
-    local_path: str,
-    filename: str,
-    session_folder: str,
+def _cloudinary_upload_with_retry(
+    *,
+    data: bytes,
+    public_id: str,
+    folder: str,
+    resource_type: str,
     max_retries: int = 3,
     session_id: Optional[str] = None,
-) -> str:
-    """Upload to Drive with exponential-backoff retries. Logs failures to Supabase."""
+) -> Dict[str, Any]:
+    """Upload to Cloudinary with exponential-backoff retries. Logs failures to Supabase."""
     for attempt in range(max_retries):
         try:
-            return drive_client.upload_file(local_path, filename, session_folder)
+            return cloudinary_client.upload_bytes(
+                data=data,
+                public_id=public_id,
+                folder=folder,
+                resource_type=resource_type,
+                overwrite=True,
+                tags=["neurosync", f"session:{session_id}" if session_id else "session:unknown"],
+                context={"session_id": session_id or ""},
+            )
         except Exception as exc:
             wait = (2 ** attempt) + random.uniform(0, 1)
-            print(f"[NeuroSync][DriveUpload] attempt {attempt+1}/{max_retries} failed: {exc}. Retrying in {wait:.1f}s")
+            print(f"[VidyaAI][CloudinaryUpload] attempt {attempt+1}/{max_retries} failed: {exc}. Retrying in {wait:.1f}s")
             if attempt < max_retries - 1:
                 time.sleep(wait)
             else:
-                supabase_client.log_error("DriveUpload", str(exc), session_id)
+                supabase_client.log_error("CloudinaryUpload", str(exc), session_id)
                 raise
 
 
 def _transcribe(audio_path: str) -> tuple:
-    """Run Whisper on *audio_path*. Returns (transcript: str, flagged: bool)."""
-    try:
-        model = _get_whisper()
-        result = model.transcribe(audio_path, fp16=False)
-        return result.get("text", "").strip(), False
-    except Exception as exc:
-        print(f"[NeuroSync][Whisper] transcription failed: {exc}")
-        return "", True
+    """Run Whisper on *audio_path*. Serialised via lock to prevent concurrent access crashes."""
+    with _whisper_lock:
+        try:
+            print(f"[VidyaAI][Whisper] transcribing {os.path.basename(audio_path)}")
+            model = _get_whisper()
+            result = model.transcribe(audio_path, fp16=False)
+            text = result.get("text", "").strip()
+            print(f"[VidyaAI][Whisper] done — {len(text)} chars")
+            return text, False
+        except Exception as exc:
+            print(f"[VidyaAI][Whisper] transcription failed: {exc}")
+            return "", True
 
 
 # ── Parse endpoints ────────────────────────────────────────────────────────────
@@ -156,10 +196,11 @@ class QuestionGenRequest(BaseModel):
     job_description: Optional[str] = ""
     model: Optional[str] = None
     ollama_url: Optional[str] = None
+    section_counts: Optional[Dict[str, int]] = None   # e.g. {"intro":2,"technical":5,"behavioral":3,"logical":3}
 
 
 @app.post("/generate-questions", response_model=InterviewScript, tags=["Questions"],
-          summary="Generate 18-20 interview questions with ideal_answer fields")
+          summary="Generate interview questions with ideal_answer fields")
 async def generate_interview_questions(req: QuestionGenRequest):
     if not req.resume_markdown and not req.job_description:
         _err("Provide resume_markdown and/or job_description.", "MISSING_INPUT", 400)
@@ -167,8 +208,9 @@ async def generate_interview_questions(req: QuestionGenRequest):
         "resume_markdown": req.resume_markdown or "",
         "job_description": req.job_description or "",
     }
-    if req.model:      kwargs["model"]      = req.model
-    if req.ollama_url: kwargs["ollama_url"] = req.ollama_url
+    if req.model:          kwargs["model"]          = req.model
+    if req.ollama_url:     kwargs["ollama_url"]     = req.ollama_url
+    if req.section_counts: kwargs["section_counts"] = req.section_counts
     try:
         return generate_questions(**kwargs)
     except Exception as e:
@@ -219,6 +261,7 @@ async def parse_and_generate(
 class CreateSessionRequest(BaseModel):
     candidate_name: str
     job_opening_id: Optional[str] = None
+    opening_title: Optional[str] = None   # human-readable title; used as job_opening_id if job_opening_id not set
     interviewer_id: str
     questions: Optional[List[Dict[str, Any]]] = None
     job_description: Optional[str] = ""
@@ -227,9 +270,20 @@ class CreateSessionRequest(BaseModel):
 @app.post("/session/create", tags=["Session"],
           summary="Create session + generate one-time candidate credentials (NSC-XXXXXX)")
 async def create_session(req: CreateSessionRequest):
-    session_id     = str(uuid.uuid4())
-    job_opening_id = req.job_opening_id or str(uuid.uuid4())
-    login_id       = _gen_login_id()
+    session_id = str(uuid.uuid4())
+
+    # Prefer explicit job_opening_id; otherwise derive from opening_title or generate UUID
+    if req.job_opening_id:
+        job_opening_id = req.job_opening_id
+    elif req.opening_title:
+        # Slugify the title: lowercase, replace non-alphanumeric with hyphens
+        import re as _re
+        slug = _re.sub(r"[^a-z0-9]+", "-", req.opening_title.lower()).strip("-")
+        job_opening_id = slug[:64] or str(uuid.uuid4())
+    else:
+        job_opening_id = str(uuid.uuid4())
+    # One login_id per opening (shared). Password remains per candidate/session.
+    login_id = supabase_client.get_opening_login_id(job_opening_id) or _gen_opening_login_id()
     raw_password   = _gen_password()
     print(f"[NeuroSync][CreateSession] session={session_id} login={login_id} opening={job_opening_id}")
     try:
@@ -273,17 +327,26 @@ class CandidateLoginRequest(BaseModel):
 @app.post("/candidate/login", tags=["Candidate"],
           summary="Validate one-time credentials → return session_id + questions")
 async def candidate_login(req: CandidateLoginRequest):
-    creds = supabase_client.get_credentials(req.login_id.strip())
-    if not creds:
+    login_id = req.login_id.strip()
+    creds_list = supabase_client.list_credentials(login_id)
+    if not creds_list:
         _err("Invalid login ID.", "INVALID_CREDENTIALS", 401)
-    if creds.get("used"):
-        _err("These credentials have already been used.", "CREDENTIALS_USED", 403)
-    if not _verify_pw(req.password, creds["hashed_password"]):
+
+    # Find the matching (unused) credential by password
+    matched = None
+    for c in creds_list:
+        if c.get("used"):
+            continue
+        if _verify_pw(req.password, c.get("hashed_password", "")):
+            matched = c
+            break
+    if not matched:
         _err("Incorrect password.", "INVALID_CREDENTIALS", 401)
-    session = supabase_client.get_session(creds["session_id"])
+
+    session = supabase_client.get_session(matched["session_id"])
     if not session:
         _err("Session not found.", "SESSION_NOT_FOUND", 404)
-    supabase_client.mark_credentials_used(req.login_id)
+    supabase_client.mark_credentials_used(int(matched["id"]))
     return {
         "session_id":      session["session_id"],
         "candidate_name":  session["candidate_name"],
@@ -292,84 +355,120 @@ async def candidate_login(req: CandidateLoginRequest):
     }
 
 
+# ── Post-session processing ───────────────────────────────────────────────────
+
+def _download_to_tmp(url: str, suffix: str) -> str:
+    import httpx
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = tmp.name
+    with httpx.stream("GET", url, timeout=120.0, follow_redirects=True) as r:
+        r.raise_for_status()
+        with open(tmp_path, "wb") as out:
+            for chunk in r.iter_bytes():
+                out.write(chunk)
+    return tmp_path
+
+
 # ── Save response ──────────────────────────────────────────────────────────────
 
 @app.post("/session/{session_id}/save-response", tags=["Session"],
-          summary="Upload audio+video → Whisper → score → Drive → Supabase")
+          summary="Upload audio+video to Cloudinary immediately (no local persistence)")
 async def save_response(
     session_id:     str                  = Path(...),
     question_id:    str                  = Form(...),
+    question_number: int                 = Form(...),
     question_text:  str                  = Form(...),
     ideal_answer:   str                  = Form(...),
     question_stage: str                  = Form("intro"),
     audio_file:     Optional[UploadFile] = File(None),
     video_file:     Optional[UploadFile] = File(None),
 ):
-    print(f"[NeuroSync][SaveResponse] session={session_id} q={question_id}")
-    audio_file_id: Optional[str] = None
-    video_file_id: Optional[str] = None
-    transcript = ""
-    transcript_flagged = False
+    print(f"[VidyaAI][SaveResponse] session={session_id} q={question_id} qn={question_number} — uploading to Cloudinary")
 
-    # Upload audio + transcribe
+    session = supabase_client.get_session(session_id)
+    login_id = (session or {}).get("login_id") or "unknown"
+    folder = cloudinary_client.build_session_folder(login_id=login_id, session_id=session_id)
+
+    audio_public_id: Optional[str] = None
+    video_public_id: Optional[str] = None
+    audio_url: Optional[str] = None
+    video_url: Optional[str] = None
+
     if audio_file:
-        suffix = os.path.splitext(audio_file.filename or "audio.webm")[1] or ".webm"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await audio_file.read())
-            audio_tmp = tmp.name
-        try:
-            transcript, transcript_flagged = _transcribe(audio_tmp)
-            fname = audio_file.filename or f"{question_id}_audio{suffix}"
-            audio_file_id = _drive_upload_with_retry(audio_tmp, fname, session_id, session_id=session_id)
-        except Exception as e:
-            supabase_client.log_error("AudioPipeline", str(e), session_id)
-        finally:
-            os.unlink(audio_tmp)
+        audio_bytes = await audio_file.read()
+        print(f"[VidyaAI][SaveResponse] audio received — {len(audio_bytes)} bytes for q={question_id}")
+        if audio_bytes:
+            audio_public_id = cloudinary_client.build_public_id(
+                login_id=login_id, session_id=session_id, question_number=question_number, kind="audio"
+            )
+            try:
+                resp = _cloudinary_upload_with_retry(
+                    data=audio_bytes,
+                    public_id=audio_public_id,
+                    folder=folder,
+                    resource_type="video",
+                    session_id=session_id,
+                )
+                audio_url = resp.get("secure_url") or resp.get("url")
+                print(f"[VidyaAI][SaveResponse] audio uploaded → {audio_url}")
+            except Exception as e:
+                print(f"[VidyaAI][SaveResponse] AUDIO UPLOAD FAILED q={question_id}: {e}")
+                supabase_client.log_error("AudioUpload", str(e), session_id)
+        else:
+            print(f"[VidyaAI][SaveResponse] audio file is empty for q={question_id}")
 
-    # Upload video
     if video_file:
-        suffix = os.path.splitext(video_file.filename or "video.webm")[1] or ".webm"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await video_file.read())
-            video_tmp = tmp.name
-        try:
-            fname = video_file.filename or f"{question_id}_video{suffix}"
-            video_file_id = _drive_upload_with_retry(video_tmp, fname, session_id, session_id=session_id)
-        except Exception as e:
-            supabase_client.log_error("VideoUpload", str(e), session_id)
-        finally:
-            os.unlink(video_tmp)
+        video_bytes = await video_file.read()
+        print(f"[VidyaAI][SaveResponse] video received — {len(video_bytes)} bytes for q={question_id}")
+        if video_bytes:
+            video_public_id = cloudinary_client.build_public_id(
+                login_id=login_id, session_id=session_id, question_number=question_number, kind="video"
+            )
+            try:
+                resp = _cloudinary_upload_with_retry(
+                    data=video_bytes,
+                    public_id=video_public_id,
+                    folder=folder,
+                    resource_type="video",
+                    session_id=session_id,
+                )
+                video_url = resp.get("secure_url") or resp.get("url")
+                print(f"[VidyaAI][SaveResponse] video uploaded → {video_url}")
+            except Exception as e:
+                print(f"[VidyaAI][SaveResponse] VIDEO UPLOAD FAILED q={question_id}: {e}")
+                supabase_client.log_error("VideoUpload", str(e), session_id)
+        else:
+            print(f"[VidyaAI][SaveResponse] video file is empty for q={question_id}")
 
-    # Score transcript
-    effective_transcript = transcript or "[NO RESPONSE — transcription unavailable]"
-    score: ResponseScore = score_response(question_id, effective_transcript, ideal_answer)
-
-    # LLM per-dimension scoring
-    from services.scoring.llm_marker import mark_response as llm_mark
-    llm = llm_mark(question_text, ideal_answer, transcript or "", question_stage)
-
+    # Upsert placeholder row (or update existing) immediately with Cloudinary pointers.
     try:
-        record = supabase_client.save_question_response(
+        supabase_client.save_question_response(
             session_id=session_id,
             question_id=question_id,
             question_text=question_text,
             ideal_answer=ideal_answer,
-            transcript=transcript,
-            transcript_flagged=transcript_flagged,
-            semantic_score=score.semantic_score,
-            sentiment=score.sentiment.model_dump(),
-            combined_score=score.combined_score,
-            technical_score=llm["technical"],
-            communication_score=llm["communication"],
-            behavioral_score=llm["behavioral"],
-            engagement_score=llm["engagement"],
-            authenticity_score=llm["authenticity"],
-            video_file_id=video_file_id,
-            audio_file_id=audio_file_id,
+            transcript="",
+            transcript_flagged=False,
+            semantic_score=0.0,
+            sentiment={"compound": 0, "pos": 0, "neg": 0, "neu": 1},
+            combined_score=0.0,
+            technical_score=0,
+            communication_score=0,
+            behavioral_score=0,
+            engagement_score=0,
+            authenticity_score=0,
+            video_file_id=video_public_id,
+            audio_file_id=audio_public_id,
+            video_url=video_url,
+            audio_url=audio_url,
         )
     except Exception as e:
+        print(f"[NeuroSync][SaveResponse] DB upsert failed ({e})")
+        supabase_client.log_error("SaveResponseDB", str(e), session_id)
         _err(f"Failed to save response: {e}", "DB_WRITE_FAILED")
-    return record
+
+    print(f"[VidyaAI][SaveResponse] DONE q={question_id} audio_url={bool(audio_url)} video_url={bool(video_url)}")
+    return {"status": "uploaded", "session_id": session_id, "question_id": question_id, "audio_url": audio_url, "video_url": video_url}
 
 
 # ── Video analysis ─────────────────────────────────────────────────────────────
@@ -421,9 +520,15 @@ async def analyze_video_chunk(
         print(f"[NeuroSync][GazeZone] {e}")
         gaze_zone_distribution = {"neutral": 1.0}
 
-    # Cheating detection
+    # Cheating detection — pass calibration baseline if available for personalised thresholds
     try:
-        cheat_result = detect_cheating(gaze_points)
+        from services.video_analysis.calibration.calibration_runner import load_calibration
+        try:
+            cal = load_calibration(session_id)
+            baseline_var = cal.get("baseline_gaze_variance", 0.004)
+        except Exception:
+            baseline_var = 0.004
+        cheat_result = detect_cheating(gaze_points, baseline_variance=baseline_var)
         cheat_flags = cheat_result if isinstance(cheat_result, dict) else {"raw": str(cheat_result)}
     except Exception as e:
         print(f"[NeuroSync][CheatDetect] {e}")
@@ -534,7 +639,7 @@ async def calibration_start(session_id: Optional[str] = None):
 
 
 @app.post("/calibration/submit", response_model=CalibrationSubmitResponse, tags=["Calibration"],
-          summary="Finalise calibration: fit affine transform, save JSON, upload to Drive")
+          summary="Finalise calibration: fit affine transform, save JSON, upload to Cloudinary")
 async def calibration_submit(req: CalibrationSubmitRequest):
     if not req.measurements:
         _err("No measurements provided.", "MISSING_MEASUREMENTS", 400)
@@ -554,10 +659,26 @@ async def calibration_submit(req: CalibrationSubmitRequest):
     cal_path = f"outputs/calibration/{req.session_id}_calibration.json"
     if os.path.exists(cal_path):
         try:
-            _drive_upload_with_retry(cal_path, f"{req.session_id}_calibration.json",
-                                     req.session_id, session_id=req.session_id)
+            session = supabase_client.get_session(req.session_id) or {}
+            login_id = session.get("login_id") or "unknown"
+            folder = cloudinary_client.build_session_folder(login_id=login_id, session_id=req.session_id)
+            with open(cal_path, "rb") as f:
+                cal_bytes = f.read()
+            public_id = f"{login_id}_{req.session_id}_calibration"
+            _cloudinary_upload_with_retry(
+                data=cal_bytes,
+                public_id=public_id,
+                folder=folder,
+                resource_type="raw",
+                session_id=req.session_id,
+            )
         except Exception:
             pass
+        finally:
+            try:
+                os.unlink(cal_path)
+            except OSError:
+                pass
 
     return CalibrationSubmitResponse(
         session_id=result.session_id,
@@ -579,7 +700,7 @@ class FinalizeConfig(BaseModel):
 @app.post("/session/{session_id}/finalize", tags=["Session"],
           summary="Aggregate all responses → OCEAN scores → role recommendation → Supabase")
 async def finalize_session(session_id: str, config: FinalizeConfig = FinalizeConfig()):
-    print(f"[NeuroSync][Finalize] session={session_id}")
+    print(f"[VidyaAI][Finalize] START session={session_id}")
     session = supabase_client.get_session(session_id)
     if not session:
         _err(f"Session '{session_id}' not found.", "SESSION_NOT_FOUND", 404)
@@ -638,9 +759,12 @@ async def finalize_session(session_id: str, config: FinalizeConfig = FinalizeCon
     if config.model:      kwargs["model"]      = config.model
     if config.ollama_url: kwargs["ollama_url"] = config.ollama_url
 
+    print(f"[VidyaAI][Finalize] Building OCEAN report — {len(scores)} responses, {len(script_qs)} questions")
     try:
         report = build_ocean_report(**kwargs)
+        print(f"[VidyaAI][Finalize] OCEAN done — job_fit={report.job_fit_score:.1f} prediction={report.success_prediction}")
     except Exception as e:
+        print(f"[VidyaAI][Finalize] OCEAN FAILED: {e}")
         _err(f"OCEAN pipeline failed: {e}", "OCEAN_FAILED")
 
     try:
@@ -668,6 +792,151 @@ async def finalize_session(session_id: str, config: FinalizeConfig = FinalizeCon
     }
 
 
+# ── Sessions list (admin dashboard) ───────────────────────────────────────────
+
+@app.get("/sessions", tags=["Session"],
+         summary="List all sessions ordered by creation date, with OCEAN summaries")
+async def list_all_sessions():
+    try:
+        return supabase_client.list_all_sessions()
+    except Exception as e:
+        _err(f"Failed to list sessions: {e}", "LIST_SESSIONS_FAILED")
+
+
+# ── Post-session async transcription ──────────────────────────────────────────
+
+@app.post("/session/{session_id}/transcribe", tags=["Session"],
+          summary="Download Cloudinary audio → Whisper → update transcripts (fires after interview ends)")
+async def transcribe_session(session_id: str):
+    """Downloads each question's audio from Cloudinary, runs Whisper transcription,
+    scores with sentence-transformers + VADER, and writes results back to Supabase.
+    Called once per session from the candidate thank-you page.
+    """
+    from services.database.supabase_client import _get_client as _sb
+    print(f"[VidyaAI][Transcribe] START session={session_id}")
+
+    c = _sb()
+    rows = (
+        c.table("question_responses")
+        .select("question_id,audio_url,transcript,question_text,ideal_answer")
+        .eq("session_id", session_id)
+        .execute()
+    ).data or []
+
+    print(f"[VidyaAI][Transcribe] Found {len(rows)} question_response rows for session={session_id}")
+
+    updated = 0
+    errors: List[str] = []
+    for row in rows:
+        aurl = row.get("audio_url")
+        qid  = row.get("question_id", "?")
+        if not aurl:
+            print(f"[VidyaAI][Transcribe] q={qid} has no audio_url — skipping")
+            continue
+        if row.get("transcript", "").strip():
+            print(f"[VidyaAI][Transcribe] q={qid} already transcribed — skipping")
+            continue
+
+        tmp_path: Optional[str] = None
+        try:
+            print(f"[VidyaAI][Transcribe] q={qid} — downloading audio from Cloudinary: {aurl[:60]}…")
+            tmp_path = _download_to_tmp(aurl, suffix=".webm")
+            print(f"[VidyaAI][Transcribe] q={qid} — running Whisper on {os.path.getsize(tmp_path)} bytes")
+            transcript, flagged = _transcribe(tmp_path)
+            print(f"[VidyaAI][Transcribe] q={qid} — transcript={repr(transcript[:80])} flagged={flagged}")
+
+            supabase_client.update_transcript(
+                session_id=session_id,
+                question_id=qid,
+                transcript=transcript,
+                transcript_flagged=flagged,
+            )
+            updated += 1
+
+            # Score transcript (lightweight — OCEAN pipeline runs in /finalize)
+            effective = transcript or "[NO RESPONSE — transcription unavailable]"
+            try:
+                score: ResponseScore = score_response(qid, effective, row.get("ideal_answer", "") or "")
+                supabase_client.save_question_response(
+                    session_id=session_id,
+                    question_id=qid,
+                    question_text=row.get("question_text", "") or "",
+                    ideal_answer=row.get("ideal_answer", "") or "",
+                    transcript=transcript,
+                    transcript_flagged=flagged,
+                    semantic_score=score.semantic_score,
+                    sentiment=score.sentiment.model_dump(),
+                    combined_score=score.combined_score,
+                )
+                print(f"[VidyaAI][Transcribe] q={qid} scored — semantic={score.semantic_score:.2f} combined={score.combined_score:.2f}")
+            except Exception as e:
+                print(f"[VidyaAI][Transcribe] q={qid} scoring failed: {e}")
+                supabase_client.log_error("TranscribeScore", str(e), session_id)
+        except Exception as e:
+            err_msg = f"q={qid}: {e}"
+            print(f"[VidyaAI][Transcribe] ERROR {err_msg}")
+            errors.append(err_msg)
+            supabase_client.log_error("Transcribe", err_msg, session_id)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    print(f"[VidyaAI][Transcribe] DONE session={session_id} — transcribed={updated} errors={len(errors)}")
+    return {"session_id": session_id, "transcribed": updated, "errors": errors}
+
+
+@app.post("/session/{session_id}/process-video", tags=["Session"],
+          summary="Download Cloudinary videos → GazeFollower metrics → Supabase")
+async def process_video_session(session_id: str):
+    """Runs heavier video-only processing after the interview ends.
+
+    - Downloads each question's video_url from Cloudinary
+    - Runs GazeFollower (or placeholder) to compute gaze direction metrics
+    - Stores results into video_signals.gaze_metrics
+    """
+    from services.database.supabase_client import _get_client as _sb
+    from services.video_analysis.gaze.gazefollower_runner import run_gazefollower_on_video
+
+    c = _sb()
+    rows = (
+        c.table("question_responses")
+        .select("question_id,video_url")
+        .eq("session_id", session_id)
+        .execute()
+    ).data or []
+
+    processed = 0
+    errors: List[str] = []
+    for row in rows:
+        vurl = row.get("video_url")
+        if not vurl:
+            continue
+        try:
+            tmp_path = _download_to_tmp(vurl, suffix=".webm")
+            metrics = run_gazefollower_on_video(tmp_path)
+            supabase_client.update_video_gaze_metrics(
+                session_id=session_id,
+                question_id=row["question_id"],
+                gaze_metrics=metrics,
+            )
+            processed += 1
+        except Exception as e:
+            err_msg = f"q={row.get('question_id')}: {e}"
+            errors.append(err_msg)
+            supabase_client.log_error("ProcessVideo", err_msg, session_id)
+        finally:
+            try:
+                if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    return {"session_id": session_id, "processed": processed, "errors": errors}
+
+
 # ── Reports & recruiter dashboard ─────────────────────────────────────────────
 
 @app.get("/session/{session_id}/report", tags=["Reports"],
@@ -693,6 +962,34 @@ async def list_candidates(job_opening_id: str):
         _err(f"Failed to list sessions: {e}", "LIST_SESSIONS_FAILED")
 
 
+@app.delete("/opening/{job_opening_id}", tags=["Session"],
+            summary="Delete opening: delete all sessions (and their media) for this job_opening_id")
+async def delete_opening(job_opening_id: str):
+    try:
+        from services.database.supabase_client import _get_client as _sb
+
+        c = _sb()
+        rows = (
+            c.table("sessions")
+            .select("session_id")
+            .eq("job_opening_id", job_opening_id)
+            .execute()
+        ).data or []
+        deleted = 0
+        for row in rows:
+            sid = row.get("session_id")
+            if not sid:
+                continue
+            try:
+                supabase_client.delete_session(sid)
+                deleted += 1
+            except Exception as e:
+                supabase_client.log_error("DeleteOpeningSession", str(e), sid)
+        return {"status": "deleted", "job_opening_id": job_opening_id, "sessions_deleted": deleted}
+    except Exception as e:
+        _err(f"Failed to delete opening: {e}", "DELETE_OPENING_FAILED")
+
+
 @app.delete("/session/{session_id}", tags=["Session"],
             summary="Delete session: purge all Drive files then all Supabase rows atomically")
 async def delete_session(session_id: str):
@@ -701,6 +998,268 @@ async def delete_session(session_id: str):
         return {"status": "deleted", "session_id": session_id}
     except Exception as e:
         _err(f"Failed to delete session: {e}", "DELETE_FAILED")
+
+
+# ── Fire-and-forget post-session pipeline ─────────────────────────────────────
+
+def _bg_post_session(session_id: str) -> None:
+    """Background: transcribe → score → finalize OCEAN → GazeFollower. Runs in daemon thread."""
+    print(f"[VidyaAI][PostSession] START session={session_id}")
+
+    from services.database.supabase_client import _get_client as _sb
+    c = _sb()
+
+    try:
+        # ── Step 1: fetch question_responses rows ──────────────────────────────
+        rows = (
+            c.table("question_responses")
+            .select("question_id,audio_url,transcript,question_text,ideal_answer")
+            .eq("session_id", session_id)
+            .execute()
+        ).data or []
+
+        total_qs = len(rows)
+        audio_rows = [r for r in rows if r.get("audio_url")]
+        print(f"[VidyaAI][PostSession] {total_qs} questions, {len(audio_rows)} have audio")
+
+        # ── Step 2: transcribe each audio file ─────────────────────────────────
+        done = 0
+        for row in audio_rows:
+            aurl = row.get("audio_url")
+            qid  = row.get("question_id", "?")
+            if row.get("transcript", "").strip():
+                print(f"[VidyaAI][PostSession] q={qid} already transcribed — skip")
+                done += 1
+                _set_stage(session_id, "transcribing", f"Transcribing audio ({done}/{len(audio_rows)})", done, len(audio_rows))
+                continue
+
+            _set_stage(session_id, "transcribing", f"Transcribing audio ({done}/{len(audio_rows)})", done, len(audio_rows))
+            tmp_path: Optional[str] = None
+            try:
+                print(f"[VidyaAI][PostSession] q={qid} downloading audio…")
+                tmp_path = _download_to_tmp(aurl, suffix=".webm")
+                transcript, flagged = _transcribe(tmp_path)
+                print(f"[VidyaAI][PostSession] q={qid} transcribed: {len(transcript)} chars")
+                supabase_client.update_transcript(
+                    session_id=session_id, question_id=qid,
+                    transcript=transcript, transcript_flagged=flagged,
+                )
+                # Score immediately after transcription
+                _set_stage(session_id, "scoring", f"Scoring response {done + 1}/{len(audio_rows)}", done, len(audio_rows))
+                try:
+                    score: ResponseScore = score_response(qid, transcript or "[NO RESPONSE]", row.get("ideal_answer", "") or "")
+                    supabase_client.save_question_response(
+                        session_id=session_id, question_id=qid,
+                        question_text=row.get("question_text", "") or "",
+                        ideal_answer=row.get("ideal_answer", "") or "",
+                        transcript=transcript, transcript_flagged=flagged,
+                        semantic_score=score.semantic_score,
+                        sentiment=score.sentiment.model_dump(),
+                        combined_score=score.combined_score,
+                    )
+                    print(f"[VidyaAI][PostSession] q={qid} scored — semantic={score.semantic_score:.2f} combined={score.combined_score:.2f}")
+                except Exception as se:
+                    print(f"[VidyaAI][PostSession] q={qid} scoring FAILED: {se}")
+                    supabase_client.log_error("PostSessionScore", str(se), session_id)
+                done += 1
+            except Exception as e:
+                print(f"[VidyaAI][PostSession] q={qid} transcription FAILED: {e}")
+                supabase_client.log_error("PostSessionTranscribe", str(e), session_id)
+                done += 1
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+        # ── Step 3: finalize OCEAN ─────────────────────────────────────────────
+        _set_stage(session_id, "finalizing", "Computing OCEAN personality profile…", total_qs, total_qs)
+        print(f"[VidyaAI][PostSession] Running OCEAN finalize for session={session_id}")
+        try:
+            import httpx
+            r = httpx.post(
+                f"http://localhost:8000/session/{session_id}/finalize",
+                json={}, timeout=180.0,
+            )
+            print(f"[VidyaAI][PostSession] Finalize HTTP status={r.status_code} for session={session_id}")
+        except Exception as e:
+            print(f"[VidyaAI][PostSession] Finalize FAILED: {e}")
+            supabase_client.log_error("PostSessionFinalize", str(e), session_id)
+
+        # ── Step 4: GazeFollower video analysis ────────────────────────────────
+        vrows = (
+            c.table("question_responses")
+            .select("question_id,video_url")
+            .eq("session_id", session_id)
+            .execute()
+        ).data or []
+        video_rows = [r for r in vrows if r.get("video_url")]
+
+        if video_rows:
+            try:
+                from services.video_analysis.gaze.gazefollower_runner import run_gazefollower_on_video
+                for vi, vrow in enumerate(video_rows):
+                    vurl = vrow.get("video_url")
+                    qid  = vrow.get("question_id", "?")
+                    _set_stage(session_id, "analyzing_gaze", f"Analyzing gaze video {vi + 1}/{len(video_rows)}", vi, len(video_rows))
+                    tmp_v: Optional[str] = None
+                    try:
+                        print(f"[VidyaAI][PostSession] GazeFollower q={qid} downloading video…")
+                        tmp_v = _download_to_tmp(vurl, suffix=".webm")
+                        metrics = run_gazefollower_on_video(tmp_v, session_id=session_id)
+                        supabase_client.update_video_gaze_metrics(
+                            session_id=session_id, question_id=qid, gaze_metrics=metrics,
+                        )
+                        print(f"[VidyaAI][PostSession] GazeFollower q={qid} OK: status={metrics.get('status')}")
+                    except Exception as e:
+                        print(f"[VidyaAI][PostSession] GazeFollower q={qid} FAILED: {e}")
+                        supabase_client.log_error("PostSessionGaze", str(e), session_id)
+                    finally:
+                        if tmp_v and os.path.exists(tmp_v):
+                            try:
+                                os.unlink(tmp_v)
+                            except Exception:
+                                pass
+            except Exception as e:
+                print(f"[VidyaAI][PostSession] GazeFollower loop FAILED: {e}")
+
+    finally:
+        _clear_stage(session_id)
+        print(f"[VidyaAI][PostSession] COMPLETE session={session_id}")
+
+
+@app.post("/session/{session_id}/process", tags=["Session"],
+          summary="Fire background pipeline: Whisper + OCEAN + GazeFollower. Returns 202 immediately.")
+async def start_post_session_processing(session_id: str):
+    """Called by the thank-you page once all recordings are uploaded.
+    Immediately returns 202. Transcription + OCEAN + GazeFollower run in background.
+    Poll /session/{id}/status to check when OCEAN results are ready.
+    """
+    print(f"[VidyaAI][Process] Queuing background pipeline for session={session_id}")
+    session = supabase_client.get_session(session_id)
+    if not session:
+        _err(f"Session '{session_id}' not found.", "SESSION_NOT_FOUND", 404)
+    threading.Thread(target=_bg_post_session, args=(session_id,), daemon=True).start()
+    return {"status": "processing", "session_id": session_id, "message": "Pipeline started. Poll /session/{id}/status for results."}
+
+
+# ── Session status (polled by candidate thank-you page) ───────────────────────
+
+@app.get("/session/{session_id}/status", tags=["Session"],
+         summary="Check pipeline stage + OCEAN readiness for a session")
+async def session_status(session_id: str):
+    """Returns live processing stage so the frontend can poll with meaningful labels.
+
+    Response fields:
+      status         — "processing" | "ready" | "not_found" | "error"
+      stage          — current pipeline stage (only when processing)
+      stage_label    — human-readable description of current stage
+      stage_done     — items completed in current stage
+      stage_total    — total items in current stage
+      transcripts_done / questions_total — transcript progress counts
+    """
+    from services.database.supabase_client import _get_client as _sb
+    try:
+        c = _sb()
+        session = supabase_client.get_session(session_id)
+        if not session:
+            return {"status": "not_found", "session_id": session_id}
+
+        # ── Check OCEAN ready ──────────────────────────────────────────────────
+        ocean_rows = (
+            c.table("ocean_reports")
+            .select("session_id,job_fit_score,success_prediction")
+            .eq("session_id", session_id)
+            .limit(1)
+            .execute()
+        ).data or []
+
+        if ocean_rows:
+            row = ocean_rows[0]
+            print(f"[VidyaAI][Status] {session_id[:8]} READY — job_fit={row.get('job_fit_score')}")
+            return {
+                "status":             "ready",
+                "session_id":         session_id,
+                "job_fit_score":      row.get("job_fit_score"),
+                "success_prediction": row.get("success_prediction"),
+            }
+
+        # ── In-flight stage info ───────────────────────────────────────────────
+        with _stages_lock:
+            stage_info = _processing_stages.get(session_id, {})
+
+        total_qs = len(session.get("questions") or [])
+        done_qs  = (
+            c.table("question_responses")
+            .select("question_id", count="exact")
+            .eq("session_id", session_id)
+            .neq("transcript", "")
+            .execute()
+        ).count or 0
+
+        stage       = stage_info.get("stage", "transcribing")
+        stage_label = stage_info.get("label", f"Transcribing audio ({done_qs}/{total_qs})…")
+        stage_done  = stage_info.get("done", done_qs)
+        stage_total = stage_info.get("total", total_qs)
+
+        print(f"[VidyaAI][Status] {session_id[:8]} PROCESSING — {stage}: {stage_done}/{stage_total}")
+        return {
+            "status":            "processing",
+            "session_id":        session_id,
+            "stage":             stage,
+            "stage_label":       stage_label,
+            "stage_done":        stage_done,
+            "stage_total":       stage_total,
+            "transcripts_done":  done_qs,
+            "questions_total":   total_qs,
+        }
+    except Exception as e:
+        print(f"[VidyaAI][Status] ERROR session={session_id}: {e}")
+        return {"status": "error", "session_id": session_id, "detail": str(e)}
+
+
+# ── Admin: database + media reset ─────────────────────────────────────────────
+
+@app.delete("/admin/reset-database", tags=["Admin"],
+            summary="Purge all Supabase data and Cloudinary media. Requires X-Admin-Secret header.")
+async def admin_reset_database(x_admin_secret: str = Header(..., alias="X-Admin-Secret")):
+    """Full environment reset for development/testing.
+
+    - Validates X-Admin-Secret against the ADMIN_SECRET env variable.
+    - Deletes all Cloudinary resources under candidates/ (video + raw).
+    - Truncates all Supabase tables in FK-safe order.
+
+    WARNING: irreversible. All candidate data, transcripts, and media will be permanently deleted.
+    """
+    expected = os.getenv("ADMIN_SECRET", "").strip()
+    if not expected:
+        _err("ADMIN_SECRET env variable is not set. Cannot perform reset.", "ADMIN_SECRET_NOT_CONFIGURED", 500)
+    if x_admin_secret != expected:
+        print(f"[VidyaAI][AdminReset] Unauthorised attempt with secret={x_admin_secret[:4]}…")
+        _err("Invalid admin secret.", "UNAUTHORIZED", 401)
+
+    print("[VidyaAI][AdminReset] ⚠ FULL DATABASE + MEDIA RESET INITIATED")
+
+    # 1. Delete Cloudinary assets
+    cloud_video_deleted = cloudinary_client.delete_by_prefix(prefix="candidates/", resource_type="video")
+    cloud_raw_deleted   = cloudinary_client.delete_by_prefix(prefix="candidates/", resource_type="raw")
+    print(f"[VidyaAI][AdminReset] Cloudinary: {cloud_video_deleted} video, {cloud_raw_deleted} raw assets deleted")
+
+    # 2. Truncate Supabase tables
+    table_results = supabase_client.truncate_all_tables()
+    total_rows = sum(v for v in table_results.values() if v >= 0)
+    print(f"[VidyaAI][AdminReset] Supabase: {total_rows} total rows deleted across {len(table_results)} tables")
+
+    # 3. Clear any in-flight stage trackers
+    with _stages_lock:
+        _processing_stages.clear()
+
+    return {
+        "status":              "reset_complete",
+        "cloudinary_deleted":  {"video": cloud_video_deleted, "raw": cloud_raw_deleted},
+        "supabase_tables":     table_results,
+    }
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────

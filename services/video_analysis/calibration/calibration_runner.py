@@ -21,27 +21,23 @@ import numpy as np
 # ── Calibration point layout (normalised screen fractions x, y) ──────────────
 # (0,0) = top-left corner; (1,1) = bottom-right corner
 CALIBRATION_POINTS: List[Tuple[float, float]] = [
-    (0.0,  0.0),   # top-left
-    (1.0,  0.0),   # top-right
-    (0.0,  1.0),   # bottom-left
-    (1.0,  1.0),   # bottom-right
-    (0.5,  0.0),   # top-center
-    (0.5,  1.0),   # bottom-center
-    (0.0,  0.5),   # left-center
-    (1.0,  0.5),   # right-center
-    (0.5,  0.5),   # center
-    (0.25, 0.25),  # upper-left-inner
-    (0.75, 0.25),  # upper-right-inner
-    (0.25, 0.75),  # lower-left-inner
-    (0.75, 0.75),  # lower-right-inner
-    (0.25, 0.5),   # mid-left-inner
-    (0.75, 0.5),   # mid-right-inner
+    # Outer corners
+    (0.05, 0.05), (0.95, 0.05), (0.05, 0.95), (0.95, 0.95),
+    # Edge midpoints
+    (0.50, 0.05), (0.05, 0.50), (0.95, 0.50), (0.50, 0.95),
+    # Centre
+    (0.50, 0.50),
+    # Inner quad corners
+    (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),
+    # Inner mid horizontals
+    (0.50, 0.25), (0.50, 0.75),
 ]
 
 FRAMES_PER_POINT = 30
 BLINK_THRESHOLD = 0.004          # normalised vertical iris displacement
 NEURODIVERSITY_VARIANCE_THRESHOLD = 0.06
 NEURODIVERSITY_SCALE = 1.4
+CAPTURE_FPS = 15.0               # frontend polls ~60–80ms; treat as ~15 fps
 
 # outputs/calibration/ lives at the repo root
 OUTPUTS_DIR = Path(__file__).resolve().parents[3] / "outputs" / "calibration"
@@ -97,7 +93,9 @@ def _cluster_variance(samples: List[IrisSample]) -> float:
     ys = np.array([s.y for s in samples])
     dx = np.diff(xs)
     dy = np.diff(ys)
-    return float(np.mean(np.sqrt(dx ** 2 + dy ** 2)))
+    d = np.sqrt(dx ** 2 + dy ** 2)
+    # Robust to occasional face-mesh glitches
+    return float(np.median(d))
 
 
 def _fit_affine_transform(
@@ -120,13 +118,13 @@ def _calibration_quality(measurements: List[PointMeasurement]) -> float:
     """
     Quality score in [0, 1].
     Tight, consistent iris clusters per dot → score close to 1.
-    A mean cluster variance of 0.05 maps to 0 quality.
+    A mean cluster variance of 0.04 maps to 0 quality.
     """
     if not measurements:
         return 0.0
     variances = [_cluster_variance(m.iris_samples) for m in measurements]
     mean_var = float(np.mean(variances))
-    quality = max(0.0, 1.0 - mean_var / 0.05)
+    quality = max(0.0, 1.0 - mean_var / 0.04)
     return round(quality, 4)
 
 
@@ -154,7 +152,7 @@ def _baseline_blink_rate(measurements: List[PointMeasurement]) -> float:
 
     if total_frames < 2:
         return 0.0
-    seconds = total_frames / 30.0
+    seconds = total_frames / CAPTURE_FPS
     return round(blink_count / (seconds / 60.0), 2)
 
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from services.database import drive_client
+from services.database import cloudinary_client
 
 load_dotenv()
 
@@ -71,20 +71,35 @@ def create_candidate_credentials(
     }).execute()
 
 
-def get_credentials(login_id: str) -> Optional[Dict[str, Any]]:
+def list_credentials(login_id: str) -> List[Dict[str, Any]]:
     c = _get_client()
     r = (
         c.table("candidate_credentials")
         .select("*")
         .eq("login_id", login_id)
+        .order("created_at", desc=True)
         .execute()
     )
-    return r.data[0] if r.data else None
+    return r.data or []
 
 
-def mark_credentials_used(login_id: str) -> None:
+def mark_credentials_used(credential_id: int) -> None:
     c = _get_client()
-    c.table("candidate_credentials").update({"used": True}).eq("login_id", login_id).execute()
+    c.table("candidate_credentials").update({"used": True}).eq("id", credential_id).execute()
+
+
+def get_opening_login_id(job_opening_id: str) -> Optional[str]:
+    c = _get_client()
+    r = (
+        c.table("sessions")
+        .select("login_id")
+        .eq("job_opening_id", job_opening_id)
+        .limit(1)
+        .execute()
+    )
+    if r.data and r.data[0].get("login_id"):
+        return str(r.data[0]["login_id"])
+    return None
 
 
 # ── Question Responses ─────────────────────────────────────────────────────────
@@ -106,6 +121,8 @@ def save_question_response(
     authenticity_score: Optional[float] = None,
     video_file_id: Optional[str] = None,
     audio_file_id: Optional[str] = None,
+    video_url: Optional[str] = None,
+    audio_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     c = _get_client()
     payload = {
@@ -125,8 +142,11 @@ def save_question_response(
         "authenticity_score":  authenticity_score,
         "video_file_id":       video_file_id,
         "audio_file_id":       audio_file_id,
+        "video_url":           video_url,
+        "audio_url":           audio_url,
     }
-    r = c.table("question_responses").insert(payload).execute()
+    # Upsert so background task can update the placeholder inserted at request-time
+    r = c.table("question_responses").upsert(payload, on_conflict="session_id,question_id").execute()
     return r.data[0] if r.data else {}
 
 
@@ -155,6 +175,38 @@ def save_video_signals(
     }
     r = c.table("video_signals").insert(payload).execute()
     return r.data[0] if r.data else {}
+
+
+def update_video_gaze_metrics(
+    session_id: str,
+    question_id: str,
+    gaze_metrics: Dict[str, Any],
+) -> None:
+    """Best-effort update of gaze_metrics on the most recent video_signals row for a question."""
+    c = _get_client()
+    rows = (
+        c.table("video_signals")
+        .select("id")
+        .eq("session_id", session_id)
+        .eq("question_id", question_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    ).data or []
+    if not rows:
+        # No row yet; create a minimal placeholder row.
+        c.table("video_signals").insert({
+            "session_id": session_id,
+            "question_id": question_id,
+            "gaze_zone_distribution": {},
+            "cheat_flags": {},
+            "emotion_distribution": {},
+            "avg_hrv_rmssd": 0,
+            "stress_spike_detected": False,
+            "gaze_metrics": gaze_metrics,
+        }).execute()
+        return
+    c.table("video_signals").update({"gaze_metrics": gaze_metrics}).eq("id", rows[0]["id"]).execute()
 
 
 # ── OCEAN Report ───────────────────────────────────────────────────────────────
@@ -202,6 +254,40 @@ def get_candidate_full_report(session_id: str) -> Dict[str, Any]:
     }
 
 
+def list_all_sessions() -> List[Dict[str, Any]]:
+    """List every session ordered by creation date, each enriched with its OCEAN summary."""
+    c = _get_client()
+    r = (
+        c.table("sessions")
+        .select("session_id,candidate_name,job_opening_id,login_id,job_description,created_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    sessions = r.data or []
+    for s in sessions:
+        oc = (
+            c.table("ocean_reports")
+            .select("job_fit_score,success_prediction")
+            .eq("session_id", s["session_id"])
+            .execute()
+        )
+        s["ocean_summary"] = oc.data[0] if oc.data else None
+    return sessions
+
+
+def update_transcript(
+    session_id: str,
+    question_id: str,
+    transcript: str,
+    transcript_flagged: bool,
+) -> None:
+    c = _get_client()
+    c.table("question_responses").update({
+        "transcript":        transcript,
+        "transcript_flagged": transcript_flagged,
+    }).eq("session_id", session_id).eq("question_id", question_id).execute()
+
+
 def list_sessions_by_opening(job_opening_id: str) -> List[Dict[str, Any]]:
     c = _get_client()
     r = (
@@ -226,7 +312,7 @@ def list_sessions_by_opening(job_opening_id: str) -> List[Dict[str, Any]]:
 
 def delete_session(session_id: str) -> None:
     c = _get_client()
-    # 1. Collect Drive file IDs from question_responses
+    # 1. Collect Cloudinary public_ids from question_responses
     files = (
         c.table("question_responses")
         .select("video_file_id,audio_file_id")
@@ -234,18 +320,53 @@ def delete_session(session_id: str) -> None:
         .execute()
     )
     for row in (files.data or []):
-        for fid in (row.get("video_file_id"), row.get("audio_file_id")):
-            if fid:
-                try:
-                    drive_client.delete_file(fid)
-                except Exception:
-                    pass
+        for pid in (row.get("video_file_id"), row.get("audio_file_id")):
+            if not pid:
+                continue
+            # Both audio/video are stored under Cloudinary's "video" resource_type.
+            cloudinary_client.destroy(public_id=pid, resource_type="video")
     # 2. Delete Supabase rows (child-first to respect FK constraints)
     c.table("video_signals").delete().eq("session_id", session_id).execute()
     c.table("ocean_reports").delete().eq("session_id", session_id).execute()
     c.table("question_responses").delete().eq("session_id", session_id).execute()
     c.table("candidate_credentials").delete().eq("session_id", session_id).execute()
     c.table("sessions").delete().eq("session_id", session_id).execute()
+
+
+# ── Admin: bulk reset ──────────────────────────────────────────────────────────
+
+def truncate_all_tables() -> Dict[str, int]:
+    """Delete every row from all tables in FK-safe order.
+
+    Returns a dict of {table_name: rows_deleted} for logging.
+    Uses PostgREST filters that match all real rows (no blank/null PKs exist).
+    """
+    c = _get_client()
+    results: Dict[str, int] = {}
+
+    # (table, column_used_as_filter, filter_type)
+    # "id_gte0"  → .gte("id", 0)      — works for BIGSERIAL PKs
+    # "sid_neq"  → .neq("session_id", "~~reset~~")  — works for TEXT PKs
+    specs = [
+        ("error_logs",            "id",         "id_gte0"),
+        ("video_signals",         "id",         "id_gte0"),
+        ("ocean_reports",         "session_id", "sid_neq"),
+        ("question_responses",    "id",         "id_gte0"),
+        ("candidate_credentials", "id",         "id_gte0"),
+        ("sessions",              "session_id", "sid_neq"),
+    ]
+    for table, col, mode in specs:
+        try:
+            if mode == "id_gte0":
+                r = c.table(table).delete().gte(col, 0).execute()
+            else:
+                r = c.table(table).delete().neq(col, "~~reset~~").execute()
+            results[table] = len(r.data or [])
+            print(f"[VidyaAI][Reset] Truncated {table}: {results[table]} rows deleted")
+        except Exception as e:
+            print(f"[VidyaAI][Reset] Failed to truncate {table}: {e}")
+            results[table] = -1
+    return results
 
 
 # ── Error logging ──────────────────────────────────────────────────────────────

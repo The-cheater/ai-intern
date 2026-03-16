@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── Warm light theme ── */
+    --background: 38 24% 93%;         /* #f5f1eb warm cream */
+    --foreground: 0 0% 10%;           /* #1a1a1a near-black text */
+    --card: 0 0% 100%;                /* #ffffff white cards */
+    --card-foreground: 0 0% 10%;
+    --primary: 245 80% 58%;           /* violet, readable on light */
+    --primary-foreground: 0 0% 100%;
+    --success: 142 60% 35%;
+    --warning: 38 85% 38%;
+    --danger: 0 70% 48%;
+    --border: 38 12% 86%;             /* #e5dfd5 warm gray border */
+    --ring: 245 80% 58%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+    transition: background-color 0.2s, border-color 0.2s, opacity 0.2s;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body;
+  }
+}
+
+@layer components {
+  .glass-card {
+    background-color: hsl(var(--card) / 0.8);
+    @apply backdrop-blur-md border shadow-violet;
+    border-color: hsl(var(--border) / 0.6);
+  }
+
+  .glass-card-active {
+    @apply glass-card shadow-violet-active;
+    border-color: hsl(var(--primary) / 0.25);
+  }
+}
+
+.font-heading {
+  font-family: var(--font-cal), system-ui, sans-serif;
+}
+
+.font-body {
+  font-family: var(--font-satoshi), system-ui, sans-serif;
+}
+
+.font-ui {
+  font-family: var(--font-matter), system-ui, sans-serif;
+}

@@ -54,12 +54,20 @@ def _get_or_create_subfolder(session_folder_name: str) -> str:
     return folder["id"]
 
 
+_MIME_MAP = {
+    ".mp4":  "video/mp4",
+    ".webm": "video/webm",
+    ".wav":  "audio/wav",
+    ".json": "application/json",
+}
+
+
 def upload_file(local_path: str, filename: str, session_folder_id: str) -> str:
-    """Upload a .mp4 or .wav file to the session subfolder on Google Drive.
+    """Upload a media or calibration file to the session subfolder on Google Drive.
 
     Args:
         local_path: Absolute path to the local file.
-        filename: Desired filename on Drive (must end with .mp4 or .wav).
+        filename: Desired filename on Drive (.mp4, .webm, .wav, or .json).
         session_folder_id: Session identifier used as the subfolder name under
             GOOGLE_DRIVE_FOLDER_ID. The subfolder is created automatically if
             it does not already exist.
@@ -68,11 +76,11 @@ def upload_file(local_path: str, filename: str, session_folder_id: str) -> str:
         The Drive file_id of the uploaded file.
     """
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in (".mp4", ".wav"):
-        raise ValueError(f"Unsupported file type '{ext}'. Only .mp4 and .wav are allowed.")
+    mime_type = _MIME_MAP.get(ext)
+    if not mime_type:
+        raise ValueError(f"Unsupported file type '{ext}'. Allowed: {list(_MIME_MAP)}")
 
     folder_id = _get_or_create_subfolder(session_folder_id)
-    mime_type = "video/mp4" if ext == ".mp4" else "audio/wav"
 
     file_metadata = {"name": filename, "parents": [folder_id]}
     media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
@@ -84,6 +92,18 @@ def upload_file(local_path: str, filename: str, session_folder_id: str) -> str:
         .execute()
     )
     return uploaded["id"]
+
+
+def download_file(file_id: str, local_path: str) -> None:
+    """Download a file from Google Drive to *local_path*."""
+    from googleapiclient.http import MediaIoBaseDownload
+    drive = _get_drive()
+    request = drive.files().get_media(fileId=file_id)
+    with open(local_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
 
 
 def delete_file(file_id: str) -> None:
