@@ -34,14 +34,14 @@ export default function PortalLogin() {
             }
 
             // Store session data for the portal pages
-            sessionStorage.setItem("neurosync_session", JSON.stringify({
+            sessionStorage.setItem("examiney_session", JSON.stringify({
                 session_id:      data.session_id,
                 candidate_name:  data.candidate_name,
                 job_description: data.job_description ?? "",
                 questions:       data.questions ?? [],
             }));
 
-            console.log("[NeuroSync][Login] session stored, redirecting to permissions");
+            console.log("[Examiney][Login] session stored, redirecting to permissions");
             router.push("/portal/permissions");
         } catch {
             setError("Could not connect to the server. Please check your internet connection.");
@@ -51,21 +51,16 @@ export default function PortalLogin() {
     };
 
     return (
-        <div className="min-h-screen bg-[#f5f1eb] flex flex-col items-center justify-center p-6 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-                <div className="absolute top-[20%] left-[20%] w-[40%] h-[40%] bg-primary/5 blur-[150px] rounded-full" />
-                <div className="absolute bottom-[20%] right-[20%] w-[30%] h-[30%] bg-violet-200/20 blur-[120px] rounded-full" />
-            </div>
-
-            <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }}
-                className="w-full max-w-md relative z-10">
-                <div className="flex flex-col items-center mb-12">
-                    <div className="w-16 h-16 bg-white border border-border rounded-3xl flex items-center justify-center mb-8 shadow-sm">
-                        <ShieldCheck className="text-primary" size={32} strokeWidth={1.5} />
+        <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+                className="w-full max-w-sm">
+                <div className="flex flex-col items-center mb-10">
+                    <div className="w-12 h-12 bg-white border border-border rounded-xl flex items-center justify-center mb-6 shadow-sm">
+                        <ShieldCheck className="text-primary" size={24} strokeWidth={1.5} />
                     </div>
-                    <h1 className="font-heading text-4xl font-bold mb-4 tracking-tight">Interview Portal</h1>
-                    <p className="font-body text-foreground/50 text-center italic text-lg px-8">
-                        Enter the credentials provided by your recruiter to begin the assessment.
+                    <h1 className="font-heading text-2xl font-semibold mb-2 tracking-tight">Interview Portal</h1>
+                    <p className="font-body text-foreground/50 text-center text-sm px-4">
+                        Enter the credentials provided by your recruiter.
                     </p>
                 </div>
 
@@ -84,7 +79,7 @@ export default function PortalLogin() {
                             <User className="absolute left-5 top-1/2 -translate-y-1/2 text-foreground/30 group-focus-within:text-primary transition-colors" size={20} />
                             <input type="text" value={candidateId} onChange={e => setCandidateId(e.target.value)}
                                 placeholder="e.g. NSC-482910"
-                                className="w-full bg-white border border-border rounded-3xl py-5 pl-14 pr-6 outline-none focus:border-primary/50 transition-all font-heading text-xl font-bold tracking-tight placeholder:text-gray-300 text-foreground shadow-sm"
+                                className="w-full bg-white border border-border rounded-xl py-3 pl-10 pr-4 outline-none focus:border-primary/50 transition-all font-body text-sm placeholder:text-gray-300 text-foreground shadow-sm"
                                 required />
                         </div>
                     </div>
@@ -95,7 +90,7 @@ export default function PortalLogin() {
                             <Key className="absolute left-5 top-1/2 -translate-y-1/2 text-foreground/30 group-focus-within:text-primary transition-colors" size={20} />
                             <input type="password" value={password} onChange={e => setPassword(e.target.value)}
                                 placeholder="Enter password"
-                                className="w-full bg-white border border-border rounded-3xl py-5 pl-14 pr-6 outline-none focus:border-primary/50 transition-all font-heading text-xl font-bold tracking-tight placeholder:text-gray-300 text-foreground shadow-sm"
+                                className="w-full bg-white border border-border rounded-xl py-3 pl-10 pr-4 outline-none focus:border-primary/50 transition-all font-body text-sm placeholder:text-gray-300 text-foreground shadow-sm"
                                 required />
                         </div>
                     </div>
@@ -108,18 +103,15 @@ export default function PortalLogin() {
                     </div>
 
                     <button type="submit" disabled={isLoading}
-                        className="w-full bg-primary hover:bg-primary/90 text-white font-heading font-black text-lg py-5 rounded-3xl shadow-violet-active flex items-center justify-center gap-3 transition-all scale-100 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50">
+                        className="w-full bg-primary hover:bg-primary/90 text-white font-ui font-semibold text-sm py-3 rounded-xl flex items-center justify-center gap-2 transition-all disabled:opacity-50">
                         {isLoading
                             ? <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-                                className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full" />
-                            : <>Enter Secured Pipeline <ArrowRight size={22} className="opacity-60" /></>
+                                className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full" />
+                            : <>Begin Interview <ArrowRight size={16} /></>
                         }
                     </button>
                 </form>
 
-                <footer className="mt-16 pt-10 border-t border-border text-center">
-                    <p className="font-ui text-[10px] text-foreground/30 uppercase tracking-[0.2em] font-black">Powered by NeuroSync AI v3.0</p>
-                </footer>
             </motion.div>
         </div>
     );

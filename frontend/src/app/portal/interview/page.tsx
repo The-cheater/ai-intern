@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     ShieldAlert, Wifi, WifiOff, ChevronRight, BrainCircuit,
-    AlertTriangle, RotateCcw, MousePointerClick, Mic, MicOff
+    AlertTriangle, RotateCcw, MousePointerClick, Mic, MicOff, Loader2
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import Script from "next/script";
@@ -33,6 +33,7 @@ export default function InterviewPage() {
     const router = useRouter();
 
     const [questions,          setQuestions]          = useState<Question[]>([]);
+    const [questionsLoaded,    setQuestionsLoaded]    = useState(false);
     const [sessionId,          setSessionId]          = useState("");
     const [currentQ,           setCurrentQ]           = useState(0);
     const [questionRevealed,   setQuestionRevealed]   = useState(false);
@@ -47,10 +48,10 @@ export default function InterviewPage() {
     const [isConnected,        setIsConnected]        = useState(true);
     const [isRecording,        setIsRecording]        = useState(false);
 
-    const audioRecorderRef   = useRef<MediaRecorder | null>(null);
     const videoRecorderRef   = useRef<MediaRecorder | null>(null);
-    const audioChunksRef     = useRef<Blob[]>([]);
     const videoChunksRef     = useRef<Blob[]>([]);
+    const audioRecorderRef   = useRef<MediaRecorder | null>(null);
+    const audioChunksRef     = useRef<Blob[]>([]);
     const streamRef          = useRef<MediaStream | null>(null);
     const waveFrameRef     = useRef<number>(0);
     const gazeVideoRef     = useRef<HTMLVideoElement>(null);
@@ -66,12 +67,41 @@ export default function InterviewPage() {
 
     // ── Load session ──────────────────────────────────────────────────────────
     useEffect(() => {
-        const raw = sessionStorage.getItem("neurosync_session");
-        if (!raw) { router.replace("/portal/login"); return; }
-        const sess = JSON.parse(raw);
-        setSessionId(sess.session_id);
-        setQuestions(sess.questions ?? []);
+        try {
+            const raw = sessionStorage.getItem("examiney_session");
+            if (!raw) { router.replace("/portal/login"); return; }
+            const sess = JSON.parse(raw);
+            setSessionId(sess.session_id);
+            setQuestions(sess.questions ?? []);
+        } catch (e) {
+            console.error("[Examiney][Interview] Failed to load session:", e);
+        } finally {
+            setQuestionsLoaded(true);
+        }
     }, [router]);
+
+    // ── Block screenshot keyboard shortcuts ───────────────────────────────────
+    useEffect(() => {
+        const block = (e: KeyboardEvent) => {
+            // PrintScreen
+            if (e.key === "PrintScreen" || e.code === "PrintScreen") { e.preventDefault(); return; }
+            // Ctrl+P / Ctrl+Shift+P (print dialog = screenshot proxy)
+            if ((e.ctrlKey || e.metaKey) && (e.key === "p" || e.key === "P")) { e.preventDefault(); return; }
+            // Ctrl+Shift+S / Cmd+Shift+S
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "s" || e.key === "S")) { e.preventDefault(); return; }
+            // Windows Snipping Tool: Win+Shift+S (can't fully block, but attempt)
+            if (e.shiftKey && e.metaKey && (e.key === "s" || e.key === "S")) { e.preventDefault(); return; }
+            // Mac screenshot: Cmd+Shift+3/4/5/6
+            if (e.metaKey && e.shiftKey && ["3","4","5","6"].includes(e.key)) { e.preventDefault(); return; }
+        };
+        const blockCtxMenu = (e: MouseEvent) => e.preventDefault();
+        document.addEventListener("keydown", block, true);
+        document.addEventListener("contextmenu", blockCtxMenu);
+        return () => {
+            document.removeEventListener("keydown", block, true);
+            document.removeEventListener("contextmenu", blockCtxMenu);
+        };
+    }, []);
 
     // ── Heartbeat ─────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -165,50 +195,48 @@ export default function InterviewPage() {
             };
             drawWave();
 
-            audioChunksRef.current = [];
-            audioRecorderRef.current = new MediaRecorder(new MediaStream(stream.getAudioTracks()), { mimeType: "audio/webm" });
-            audioRecorderRef.current.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-            audioRecorderRef.current.start(250);
-
             videoChunksRef.current = [];
             videoRecorderRef.current = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp8,opus" });
             videoRecorderRef.current.ondataavailable = e => { if (e.data.size > 0) videoChunksRef.current.push(e.data); };
             videoRecorderRef.current.start(250);
 
+            // Audio-only recorder for separate Whisper transcription
+            audioChunksRef.current = [];
+            const audioStream = new MediaStream(stream.getAudioTracks());
+            audioRecorderRef.current = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
+            audioRecorderRef.current.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+            audioRecorderRef.current.start(250);
+
             setIsRecording(true);
-            console.log(`[NeuroSync][Interview] Recording started for Q${currentQ + 1}`);
+            console.log(`[Examiney][Interview] Recording started for Q${currentQ + 1}`);
         } catch (err) {
-            console.error("[NeuroSync][Recording] failed:", err);
+            console.error("[Examiney][Recording] failed:", err);
             showToast("Camera/microphone access required.");
         }
     }, [currentQ, showToast]);
 
     // ── Stop + collect blobs ──────────────────────────────────────────────────
-    const stopRecording = useCallback((): Promise<{ audio: Blob; video: Blob }> =>
+    const stopRecording = useCallback((): Promise<{ video: Blob; audio: Blob }> =>
         new Promise(resolve => {
             cancelAnimationFrame(waveFrameRef.current);
             setWaveHeights(Array(80).fill(4));
             setIsRecording(false);
 
-            let audioDone = false, videoDone = false;
-            let audioBlob: Blob = new Blob(), videoBlob: Blob = new Blob();
-            const checkDone = () => { if (audioDone && videoDone) resolve({ audio: audioBlob, video: videoBlob }); };
-
+            // Stop audio recorder immediately (doesn't need onstop coordination)
             if (audioRecorderRef.current?.state !== "inactive") {
-                audioRecorderRef.current!.onstop = () => {
-                    audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-                    audioDone = true; checkDone();
-                };
                 audioRecorderRef.current!.stop();
-            } else { audioDone = true; checkDone(); }
+            }
 
             if (videoRecorderRef.current?.state !== "inactive") {
                 videoRecorderRef.current!.onstop = () => {
-                    videoBlob = new Blob(videoChunksRef.current, { type: "video/webm" });
-                    videoDone = true; checkDone();
+                    const video = new Blob(videoChunksRef.current, { type: "video/webm" });
+                    const audio = new Blob(audioChunksRef.current, { type: "audio/webm" });
+                    resolve({ video, audio });
                 };
                 videoRecorderRef.current!.stop();
-            } else { videoDone = true; checkDone(); }
+            } else {
+                resolve({ video: new Blob(), audio: new Blob() });
+            }
 
             streamRef.current?.getTracks().forEach(t => t.stop());
         }), []);
@@ -225,44 +253,67 @@ export default function InterviewPage() {
     }, [questionRevealed, submitting, questions, currentQ, startRecording]);
 
     // ── Submit answer ─────────────────────────────────────────────────────────
+    /** Retry a fetch up to `maxAttempts` times with exponential back-off. */
+    const fetchWithRetry = useCallback(async (
+        url: string, init: RequestInit, maxAttempts = 3,
+    ): Promise<void> => {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                const res = await fetch(url, init);
+                if (res.ok || res.status < 500) return; // success or client error — don't retry
+            } catch (_) { /* network error — retry */ }
+            if (attempt < maxAttempts - 1) {
+                await new Promise(r => setTimeout(r, 800 * 2 ** attempt)); // 0.8s, 1.6s
+            }
+        }
+    }, []);
+
     const handleSubmit = useCallback(async () => {
         if (submitting || !questionRevealed) return;
         setSubmitting(true);
         try {
-            const q          = questions[currentQ];
-            const { audio, video } = await stopRecording();
-            const gazeCopy   = [...gazeSamplesRef.current];
+            const q                  = questions[currentQ];
+            const { video, audio }   = await stopRecording();
+            const gazeCopy = [...gazeSamplesRef.current];
             gazeSamplesRef.current = [];
 
-            const qNum = currentQ + 1;
-            const audioFd = new FormData();
-            audioFd.append("session_id",     sessionId);
-            audioFd.append("question_id",    q.id);
-            audioFd.append("question_number", String(qNum));
-            audioFd.append("question_text",  q.question);
-            audioFd.append("ideal_answer",   q.ideal_answer ?? "");
-            audioFd.append("question_stage", q.stage ?? "intro");
-            if (audio.size > 0) audioFd.append("audio_file", audio, `question${qNum}_audio.webm`);
-            if (video.size > 0) audioFd.append("video_file", video, `question${qNum}_video.webm`);
+            const qNum  = currentQ + 1;
+            const fname = `question${qNum}_video.webm`;
 
-            const videoFd = new FormData();
-            videoFd.append("session_id",   sessionId);
-            videoFd.append("question_id",  q.id);
-            videoFd.append("gaze_samples", JSON.stringify(gazeCopy));
-            if (video.size > 0) videoFd.append("video_file", video, `question${qNum}_video.webm`);
+            const saveFd = new FormData();
+            saveFd.append("session_id",      sessionId);
+            saveFd.append("question_id",     q.id);
+            saveFd.append("question_number", String(qNum));
+            saveFd.append("question_text",   q.question);
+            saveFd.append("ideal_answer",    q.ideal_answer ?? "");
+            saveFd.append("question_stage",  q.stage ?? "intro");
+            if (video.size > 0) saveFd.append("video_file", video, fname);
+            if (audio.size > 0) saveFd.append("audio_file", audio, `question${qNum}_audio.webm`);
 
-            // Fire-and-forget — server queues background transcription and responds immediately
-            fetch(`${API}/session/${sessionId}/save-response`, { method: "POST", body: audioFd }).catch(() => {});
-            fetch(`${API}/video/analyze-chunk`,               { method: "POST", body: videoFd }).catch(() => {});
+            const gazeFd = new FormData();
+            gazeFd.append("session_id",   sessionId);
+            gazeFd.append("question_id",  q.id);
+            gazeFd.append("gaze_samples", JSON.stringify(gazeCopy));
+            if (video.size > 0) gazeFd.append("video_file", video, fname);
 
             const isLast = currentQ >= questions.length - 1;
+
             if (isLast) {
-                // Fire-and-forget: after interview ends, trigger post-session transcription/processing.
-                fetch(`${API}/session/${sessionId}/transcribe`, { method: "POST" }).catch(() => {});
-                fetch(`${API}/session/${sessionId}/process-video`, { method: "POST" }).catch(() => {});
+                // For the final answer, await the upload (with retry) so the video is
+                // in Cloudinary before the backend starts post-session processing.
+                await fetchWithRetry(
+                    `${API}/session/${sessionId}/save-response`,
+                    { method: "POST", body: saveFd },
+                    3,
+                );
+                fetch(`${API}/video/analyze-chunk`, { method: "POST", body: gazeFd }).catch(() => {});
                 router.push("/portal/thank-you");
                 return;
             }
+
+            // Non-last questions: fire-and-forget with a silent retry on failure
+            fetchWithRetry(`${API}/session/${sessionId}/save-response`, { method: "POST", body: saveFd }, 2).catch(() => {});
+            fetch(`${API}/video/analyze-chunk`,               { method: "POST", body: gazeFd }).catch(() => {});
 
             setCurrentQ(currentQ + 1);
             setQuestionRevealed(false);
@@ -270,12 +321,12 @@ export default function InterviewPage() {
             setIsInterstitial(true);
             setInterstitialCount(5);
         } catch (err) {
-            console.error("[NeuroSync][Interview] submit error:", err);
+            console.error("[Examiney][Interview] submit error:", err);
             showToast("Failed to save answer — continuing interview.");
         } finally {
             setSubmitting(false);
         }
-    }, [submitting, questionRevealed, questions, currentQ, stopRecording, sessionId, router, showToast]);
+    }, [submitting, questionRevealed, questions, currentQ, stopRecording, sessionId, router, showToast, fetchWithRetry]);
 
     // ── Fullscreen ────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -287,7 +338,14 @@ export default function InterviewPage() {
         return () => document.removeEventListener("fullscreenchange", handler);
     }, []);
     const attemptFullscreen = () => {
-        if (warningCount >= 2) { router.push("/portal/terminated"); return; }
+        if (warningCount >= 2) {
+            // Flag session as high-integrity-risk before redirecting
+            if (sessionId) {
+                fetch(`${API}/session/${sessionId}/flag-integrity`, { method: "POST" }).catch(() => {});
+            }
+            router.push("/portal/terminated");
+            return;
+        }
         document.documentElement.requestFullscreen().catch(() => {});
     };
 
@@ -334,7 +392,32 @@ export default function InterviewPage() {
                 </AnimatePresence>
 
                 <AnimatePresence mode="wait">
-                    {!isInterstitial && !showWarning && currentQuestion && (
+                    {/* Loading state */}
+                    {!questionsLoaded && (
+                        <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                            className="flex flex-col items-center gap-4 text-foreground/40">
+                            <Loader2 size={40} className="animate-spin" />
+                            <p className="font-ui text-sm uppercase tracking-widest">Loading interview…</p>
+                        </motion.div>
+                    )}
+
+                    {/* Empty questions fallback */}
+                    {questionsLoaded && !currentQuestion && !isInterstitial && !showWarning && (
+                        <motion.div key="no-questions" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                            className="flex flex-col items-center gap-6 text-center max-w-md">
+                            <AlertTriangle size={48} className="text-warning" />
+                            <div>
+                                <h2 className="font-heading text-2xl font-bold mb-2">No Questions Found</h2>
+                                <p className="text-foreground/50 text-sm">Your interview questions could not be loaded. Please contact your recruiter or try logging in again.</p>
+                            </div>
+                            <button onClick={() => router.replace("/portal/login")}
+                                className="bg-primary text-white font-heading font-bold px-8 py-4 rounded-2xl hover:bg-primary/90 transition-all">
+                                Return to Login
+                            </button>
+                        </motion.div>
+                    )}
+
+                    {questionsLoaded && !isInterstitial && !showWarning && currentQuestion && (
                         <motion.div key={`q-${currentQ}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                             className="w-full max-w-5xl flex flex-col items-center relative z-10">
 
@@ -405,14 +488,17 @@ export default function InterviewPage() {
                                         </button>
                                     </motion.div>
                                 ) : (
-                                    <motion.div key="revealed" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
-                                        <div className="bg-danger/10 border border-danger/20 inline-flex items-center gap-3 px-5 py-2 rounded-full mb-8 text-danger">
+                                    <motion.div key="revealed" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="w-full">
+                                        <div className="bg-danger/10 border border-danger/20 inline-flex items-center gap-3 px-5 py-2 rounded-full mb-6 text-danger">
                                             <Mic size={16} className="animate-pulse" />
                                             <span className="font-ui text-xs font-black uppercase tracking-[0.25em]">Recording in Progress</span>
                                         </div>
-                                        <h2 className="font-heading text-5xl font-black italic leading-[1.3] tracking-tighter">
-                                            {currentQuestion.question}
-                                        </h2>
+                                        <div className="bg-white border border-border rounded-2xl p-8 shadow-sm">
+                                            <p className="font-ui text-xs uppercase tracking-widest text-foreground/50 mb-3">Question {currentQ + 1} of {totalQ}</p>
+                                            <h2 className="font-heading text-2xl font-semibold leading-relaxed text-foreground">
+                                                {currentQuestion.question}
+                                            </h2>
+                                        </div>
                                     </motion.div>
                                 )}
                             </div>

@@ -22,7 +22,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     // Auth guard — skip for login page itself
     useEffect(() => {
         if (pathname === "/dashboard/login") return;
-        const auth = localStorage.getItem("vidya_admin_auth");
+        const auth = localStorage.getItem("examiney_admin_auth");
         if (!auth) {
             router.replace("/dashboard/login");
         }
@@ -34,7 +34,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
 
     const handleLogout = () => {
-        localStorage.removeItem("vidya_admin_auth");
+        localStorage.removeItem("examiney_admin_auth");
         router.replace("/dashboard/login");
     };
 
@@ -54,7 +54,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center group-hover:shadow-violet transition-all">
                             <span className="font-heading text-white font-bold text-sm">V</span>
                         </div>
-                        <span className="font-heading text-xl font-bold tracking-tight text-foreground">Vidya AI</span>
+                        <span className="font-heading text-xl font-bold tracking-tight text-foreground">Examiney.AI</span>
                     </Link>
                 </div>
 
@@ -96,8 +96,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
             {/* Main Content */}
             <main className="flex-1 ml-64 min-h-screen relative">
-                <div className="absolute top-[-10%] right-[-5%] w-[40%] h-[40%] bg-primary/5 blur-[120px] rounded-full pointer-events-none" />
-                <div className="absolute bottom-[-5%] left-[10%] w-[30%] h-[30%] bg-violet-200/20 blur-[100px] rounded-full pointer-events-none" />
 
                 {/* Top Header */}
                 <header className="sticky top-0 z-10 flex items-center justify-between px-8 py-4 bg-white/90 backdrop-blur-md border-b border-border shadow-sm">
@@ -118,7 +116,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                                 <p className="font-ui font-bold text-sm text-foreground">Admin</p>
                                 <p className="font-ui text-[10px] text-foreground/40 uppercase tracking-widest leading-none">Recruiter</p>
                             </div>
-                            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary to-violet-500 flex items-center justify-center font-heading font-bold text-white text-sm">
+                            <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center font-heading font-bold text-white text-sm">
                                 A
                             </div>
                         </div>

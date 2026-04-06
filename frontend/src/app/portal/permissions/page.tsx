@@ -6,7 +6,6 @@ import {
     Camera,
     Mic,
     CheckCircle2,
-    ShieldAlert,
     AlertTriangle,
     ArrowRight,
     XCircle,
@@ -63,21 +62,16 @@ export default function PermissionGate() {
     };
 
     return (
-        <div className="min-h-screen bg-[#f5f1eb] flex flex-col items-center justify-center p-6 space-y-12 overflow-hidden relative">
-            <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-                <div className="absolute top-[30%] left-[30%] w-[40%] h-[40%] bg-primary/5 blur-[150px] rounded-full" />
-                <div className="absolute bottom-[30%] right-[30%] w-[30%] h-[30%] bg-emerald-200/20 blur-[120px] rounded-full" />
-            </div>
-
+        <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6">
             <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="w-full max-w-4xl relative z-10"
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full max-w-2xl"
             >
-                <div className="text-center mb-16">
-                    <h1 className="font-heading text-6xl font-black mb-4 tracking-tighter">Secure Initialization</h1>
-                    <p className="font-body text-foreground/50 text-xl italic font-medium">
-                        Verify your environment and grant necessary permissions to proceed.
+                <div className="text-center mb-10">
+                    <h1 className="font-heading text-2xl font-semibold mb-2">Check Permissions</h1>
+                    <p className="font-body text-foreground/50 text-sm">
+                        Grant camera and microphone access to proceed.
                     </p>
                 </div>
 
@@ -94,89 +88,71 @@ export default function PermissionGate() {
                     )}
                 </AnimatePresence>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-16">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                     {/* Camera */}
-                    <div className={`p-10 rounded-[2.5rem] border shadow-2xl transition-all ${
-                        cameraState === "granted" ? "bg-emerald-500/5 border-emerald-500/20"
-                        : cameraState === "denied" ? "bg-danger/5 border-danger/20"
-                        : "bg-white border-border shadow-sm"
+                    <div className={`p-6 rounded-xl border transition-all ${
+                        cameraState === "granted" ? "bg-emerald-50 border-emerald-200"
+                        : cameraState === "denied" ? "bg-red-50 border-red-200"
+                        : "bg-white border-border"
                     }`}>
-                        <div className="flex items-center justify-between mb-8">
-                            <div className={`p-4 rounded-3xl ${
-                                cameraState === "granted" ? "bg-emerald-500/20 text-emerald-400"
-                                : cameraState === "denied" ? "bg-danger/20 text-danger"
+                        <div className="flex items-center justify-between mb-4">
+                            <div className={`p-2.5 rounded-lg ${
+                                cameraState === "granted" ? "bg-emerald-100 text-emerald-600"
+                                : cameraState === "denied" ? "bg-red-100 text-red-500"
                                 : "bg-gray-100 text-foreground/40"
                             }`}>
-                                <Camera size={32} strokeWidth={1.5} />
+                                <Camera size={20} strokeWidth={1.5} />
                             </div>
                             <StateIcon state={cameraState} />
                         </div>
-                        <h3 className="font-heading text-2xl font-bold mb-2">Camera Assessment</h3>
-                        <p className="font-body text-foreground/50 text-sm italic leading-relaxed">
-                            Access is required to monitor facial micro-expressions and gaze distribution throughout the session.
+                        <h3 className="font-heading text-base font-semibold mb-1">Camera</h3>
+                        <p className="font-body text-foreground/50 text-xs leading-relaxed">
+                            Required to record your video interview.
                         </p>
                     </div>
 
                     {/* Microphone */}
-                    <div className={`p-10 rounded-[2.5rem] border shadow-2xl transition-all ${
-                        micState === "granted" ? "bg-emerald-500/5 border-emerald-500/20"
-                        : micState === "denied" ? "bg-danger/5 border-danger/20"
-                        : "bg-white border-border shadow-sm"
+                    <div className={`p-6 rounded-xl border transition-all ${
+                        micState === "granted" ? "bg-emerald-50 border-emerald-200"
+                        : micState === "denied" ? "bg-red-50 border-red-200"
+                        : "bg-white border-border"
                     }`}>
-                        <div className="flex items-center justify-between mb-8">
-                            <div className={`p-4 rounded-3xl ${
-                                micState === "granted" ? "bg-emerald-500/20 text-emerald-400"
-                                : micState === "denied" ? "bg-danger/20 text-danger"
+                        <div className="flex items-center justify-between mb-4">
+                            <div className={`p-2.5 rounded-lg ${
+                                micState === "granted" ? "bg-emerald-100 text-emerald-600"
+                                : micState === "denied" ? "bg-red-100 text-red-500"
                                 : "bg-gray-100 text-foreground/40"
                             }`}>
-                                <Mic size={32} strokeWidth={1.5} />
+                                <Mic size={20} strokeWidth={1.5} />
                             </div>
                             <StateIcon state={micState} />
                         </div>
-                        <h3 className="font-heading text-2xl font-bold mb-2">Voice Calibration</h3>
-                        <p className="font-body text-foreground/50 text-sm italic leading-relaxed">
-                            Analyzing vocal tonality and polarity stability in real-time. Speak briefly to test sensitivity.
+                        <h3 className="font-heading text-base font-semibold mb-1">Microphone</h3>
+                        <p className="font-body text-foreground/50 text-xs leading-relaxed">
+                            Required to capture your spoken responses.
                         </p>
                     </div>
                 </div>
 
                 {/* Fullscreen Warning */}
-                <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.4 }}
-                    className="bg-danger/10 border border-danger/30 rounded-[2rem] p-8 flex flex-col md:flex-row gap-6 items-center shadow-2xl mb-12 relative group overflow-hidden"
-                >
-                    <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none group-hover:opacity-10 transition-opacity">
-                        <ShieldAlert size={120} className="text-danger" />
-                    </div>
-                    <div className="w-16 h-16 bg-danger/20 text-danger rounded-2xl flex items-center justify-center flex-shrink-0 animate-pulse">
-                        <AlertTriangle size={32} />
-                    </div>
-                    <div className="flex-1 text-center md:text-left">
-                        <h4 className="font-heading text-xl font-bold text-foreground mb-2 uppercase tracking-wide">Fullscreen Protocol Enforced</h4>
-                        <p className="font-ui text-xs font-bold text-danger/80 leading-relaxed italic uppercase tracking-[0.1em]">
-                            Exiting full-screen during the assessment will trigger a warning. A second attempt will result in immediate termination of the interview session.
-                        </p>
-                    </div>
-                </motion.div>
-
-                <div className="flex justify-center">
-                    <button
-                        onClick={handleStart}
-                        disabled={!isReady}
-                        className={`group relative px-12 py-6 rounded-2xl font-heading text-2xl font-black transition-all shadow-2xl flex items-center gap-6 overflow-hidden ${isReady
-                            ? "bg-primary text-white scale-100 hover:scale-105 active:scale-[0.98] shadow-violet-active"
-                            : "bg-gray-200 text-foreground/30 border border-border opacity-50 cursor-not-allowed"
-                        }`}
-                    >
-                        {isReady && <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-shimmer" />}
-                        <span className="relative z-10 flex items-center gap-4">
-                            I&apos;m Ready — Begin Calibration
-                            <ArrowRight size={24} className="group-hover:translate-x-2 transition-transform" />
-                        </span>
-                    </button>
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3 items-start mb-8">
+                    <AlertTriangle size={16} className="text-amber-500 mt-0.5 flex-shrink-0" />
+                    <p className="font-ui text-xs text-foreground/60 leading-relaxed">
+                        <span className="font-semibold text-foreground">Full-screen is required.</span> Exiting full-screen will trigger a warning. A second violation will end your session.
+                    </p>
                 </div>
+
+                <button
+                    onClick={handleStart}
+                    disabled={!isReady}
+                    className={`w-full py-3 rounded-xl font-ui font-semibold text-sm flex items-center justify-center gap-2 transition-all ${isReady
+                        ? "bg-primary hover:bg-primary/90 text-white"
+                        : "bg-gray-200 text-foreground/30 cursor-not-allowed"
+                    }`}
+                >
+                    Continue to Calibration
+                    <ArrowRight size={16} />
+                </button>
             </motion.div>
         </div>
     );

@@ -28,7 +28,7 @@ export default function DashboardLogin() {
 
         setTimeout(() => {
             if (email.trim() === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
-                localStorage.setItem("vidya_admin_auth", JSON.stringify({
+                localStorage.setItem("examiney_admin_auth", JSON.stringify({
                     email: ADMIN_EMAIL,
                     loginAt: Date.now(),
                 }));
@@ -44,10 +44,6 @@ export default function DashboardLogin() {
         <div className="min-h-screen flex">
             {/* Left Side: Stats & Tagline — always dark */}
             <div className="hidden lg:flex flex-1 flex-col justify-center px-20 bg-[#0f172a] border-r border-white/5 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
-                    <div className="absolute top-[10%] left-[10%] w-[40%] h-[40%] bg-primary blur-[120px] rounded-full animate-pulse" />
-                    <div className="absolute bottom-[10%] right-[10%] w-[30%] h-[30%] bg-violet-500 blur-[100px] rounded-full" />
-                </div>
 
                 <motion.div
                     initial={{ opacity: 0, x: -20 }}
@@ -59,7 +55,7 @@ export default function DashboardLogin() {
                         <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
                             <span className="font-heading text-xl font-bold text-white">V</span>
                         </div>
-                        <span className="font-heading text-2xl font-bold text-white">Vidya AI</span>
+                        <span className="font-heading text-2xl font-bold text-white">Examiney.AI</span>
                     </div>
 
                     <h1 className="font-heading text-6xl font-bold leading-tight mb-6 text-white">
@@ -100,7 +96,7 @@ export default function DashboardLogin() {
                         <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
                             <span className="font-heading text-sm font-bold text-white">V</span>
                         </div>
-                        <span className="font-heading text-xl font-bold text-foreground">Vidya AI</span>
+                        <span className="font-heading text-xl font-bold text-foreground">Examiney.AI</span>
                     </div>
 
                     <div className="mb-10 text-center lg:text-left">
@@ -165,7 +161,7 @@ export default function DashboardLogin() {
                     </form>
 
                     <footer className="mt-10 pt-10 border-t border-border text-center text-sm font-ui text-foreground/30">
-                        &copy; 2024 Vidya AI Recruitment. All rights reserved.
+                        &copy; 2025 Examiney.AI Recruitment. All rights reserved.
                     </footer>
                 </div>
             </div>

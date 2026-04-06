@@ -31,14 +31,14 @@ const rules = [
         color: "text-violet-400",
         bg: "bg-violet-500/10 border-violet-500/20",
         title: "Stay in frame",
-        body: "Your video is recorded per question. Keep your face visible and centred. Your gaze is also tracked — look at the screen while answering.",
+        body: "Your video is recorded for each response. Keep your face clearly visible and centred in the frame throughout your answer.",
     },
     {
         icon: Eye,
         color: "text-cyan-400",
         bg: "bg-cyan-500/10 border-cyan-500/20",
         title: "Gaze monitoring is active",
-        body: "The calibration profile from the previous step is used to track where you look during each answer. Maintain natural eye contact with the screen.",
+        body: "Eye contact with the screen is part of the assessment. Look at the question text while you answer, as you naturally would in any face-to-face interview.",
     },
     {
         icon: ShieldAlert,
@@ -59,31 +59,26 @@ export default function InstructionsPage() {
     };
 
     return (
-        <div className="min-h-screen bg-[#f5f1eb] text-foreground flex flex-col items-center justify-start py-16 px-6 font-body overflow-y-auto">
-            <div className="absolute inset-0 pointer-events-none">
-                <div className="absolute top-0 left-1/4 w-1/2 h-1/3 bg-primary/5 blur-[180px] rounded-full" />
-                <div className="absolute bottom-0 right-1/4 w-1/3 h-1/4 bg-violet-200/15 blur-[150px] rounded-full" />
-            </div>
-
-            <div className="relative z-10 w-full max-w-3xl">
-                <motion.div initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
-                    className="text-center mb-12">
-                    <div className="inline-flex items-center gap-2 bg-indigo-500/10 border border-indigo-500/20 px-4 py-2 rounded-full mb-6">
-                        <CheckCircle2 size={16} className="text-indigo-400" />
-                        <span className="font-ui text-xs text-indigo-600 uppercase tracking-widest font-bold">Calibration Complete</span>
+        <div className="min-h-screen bg-gray-50 text-foreground flex flex-col items-center justify-start py-12 px-6 font-body overflow-y-auto">
+            <div className="w-full max-w-2xl">
+                <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}
+                    className="text-center mb-8">
+                    <div className="inline-flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full mb-5">
+                        <CheckCircle2 size={14} className="text-emerald-500" />
+                        <span className="font-ui text-xs text-emerald-700 font-semibold">Calibration Complete</span>
                     </div>
-                    <h1 className="font-heading text-5xl font-black italic tracking-tighter mb-4">Before You Begin</h1>
-                    <p className="text-foreground/50 text-lg max-w-xl mx-auto leading-relaxed">
-                        Read through the interview rules carefully. The session is monitored — take a breath, you&apos;re ready.
+                    <h1 className="font-heading text-2xl font-semibold mb-3">Before You Begin</h1>
+                    <p className="text-foreground/50 text-sm max-w-md mx-auto leading-relaxed">
+                        Read through the interview rules. The session is monitored.
                     </p>
                 </motion.div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-12">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-8">
                     {rules.map((rule, i) => (
                         <motion.div key={i}
-                            initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 0.1 + i * 0.07 }}
-                            className={`p-6 rounded-2xl border ${rule.bg} bg-white/60 shadow-sm`}>
+                            initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.05 + i * 0.05 }}
+                            className={`p-5 rounded-xl border ${rule.bg} bg-white shadow-sm`}>
                             <div className="flex items-start gap-4">
                                 <div className={`p-2.5 rounded-xl ${rule.bg} border ${rule.bg.split(" ")[1]} flex-shrink-0`}>
                                     <rule.icon size={22} className={rule.color} strokeWidth={1.5} />
@@ -97,20 +92,19 @@ export default function InstructionsPage() {
                     ))}
                 </div>
 
-                <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.6 }}
-                    className="bg-white border border-border rounded-2xl p-6 mb-10 text-center shadow-sm">
-                    <p className="text-foreground/60 text-sm leading-relaxed">
-                        <span className="text-foreground font-semibold">Your responses are stored securely.</span>{" "}
-                        Audio and video are recorded only while a question is revealed. Transcripts are generated automatically after the session — you will not be interrupted mid-answer for analysis.
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 }}
+                    className="bg-white border border-border rounded-xl p-5 mb-8 text-center">
+                    <p className="text-foreground/60 text-xs leading-relaxed">
+                        <span className="text-foreground font-semibold">Your responses are handled with full confidentiality.</span>{" "}
+                        Answer naturally — there is no trick to it.
                     </p>
                 </motion.div>
 
-                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: 0.7 }}
-                    className="flex justify-center">
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}>
                     <button onClick={handleStart}
-                        className="group bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-heading font-black text-base uppercase tracking-[0.15em] px-14 py-6 rounded-2xl flex items-center gap-4 transition-all shadow-[0_0_40px_rgba(99,102,241,0.3)]">
-                        I&apos;m Ready — Start Interview
-                        <ChevronRight size={22} className="group-hover:translate-x-1 transition-transform" />
+                        className="w-full bg-primary hover:bg-primary/90 active:scale-[0.99] text-white font-ui font-semibold text-sm py-3 rounded-xl flex items-center justify-center gap-2 transition-all">
+                        Start Interview
+                        <ChevronRight size={16} />
                     </button>
                 </motion.div>
             </div>

@@ -4,14 +4,15 @@
 
 -- ── Sessions ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id     TEXT        PRIMARY KEY,
-    candidate_name TEXT        NOT NULL,
-    job_opening_id TEXT        NOT NULL,
-    interviewer_id TEXT        NOT NULL,
-    login_id       TEXT        NOT NULL,               -- Opening login ID (shared per job_opening_id)
-    questions      JSONB       NOT NULL DEFAULT '[]',  -- full InterviewScript questions
-    job_description TEXT       NOT NULL DEFAULT '',
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    session_id       TEXT        PRIMARY KEY,
+    candidate_name   TEXT        NOT NULL,
+    job_opening_id   TEXT        NOT NULL,
+    interviewer_id   TEXT        NOT NULL,
+    login_id         TEXT        NOT NULL,               -- Opening login ID (shared per job_opening_id)
+    questions        JSONB       NOT NULL DEFAULT '[]',  -- full InterviewScript questions
+    job_description  TEXT        NOT NULL DEFAULT '',
+    calibration_data JSONB       NOT NULL DEFAULT '{}',  -- affine transform + quality score from /calibration/submit
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_opening  ON sessions(job_opening_id);
@@ -51,6 +52,10 @@ CREATE TABLE IF NOT EXISTS question_responses (
     audio_file_id        TEXT,
     video_url            TEXT,
     audio_url            TEXT,
+    llm_verdict          TEXT,                              -- "Strong" | "Adequate" | "Weak" | "Off-topic"
+    llm_verdict_reason   TEXT,
+    llm_key_gaps         JSONB       NOT NULL DEFAULT '[]',
+    llm_strengths        JSONB       NOT NULL DEFAULT '[]',
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -65,7 +70,7 @@ CREATE TABLE IF NOT EXISTS video_signals (
     gaze_zone_distribution JSONB       NOT NULL DEFAULT '{}',
     cheat_flags            JSONB       NOT NULL DEFAULT '{}',
     emotion_distribution   JSONB       NOT NULL DEFAULT '{}',
-    avg_hrv_rmssd          FLOAT       NOT NULL DEFAULT 0,
+    avg_hrv_rmssd          FLOAT,                              -- NULL when rPPG data is unavailable
     hr_bpm                 FLOAT,
     gaze_metrics           JSONB       NOT NULL DEFAULT '{}',
     stress_spike_detected  BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -73,6 +78,7 @@ CREATE TABLE IF NOT EXISTS video_signals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vs_session ON video_signals(session_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vs_session_question ON video_signals(session_id, question_id);
 
 -- ── OCEAN Reports ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ocean_reports (
@@ -86,6 +92,9 @@ CREATE TABLE IF NOT EXISTS ocean_reports (
     job_fit_score       FLOAT       NOT NULL,
     success_prediction  TEXT        NOT NULL,           -- "High" | "Medium" | "Low"
     role_recommendation TEXT        NOT NULL,
+    ocean_confidence    TEXT        NOT NULL DEFAULT 'Low',  -- "High" | "Medium" | "Low"
+    trait_coverage      JSONB       NOT NULL DEFAULT '{}',   -- {trait: "full"|"partial"|"limited"|"none"}
+    stages_covered      JSONB       NOT NULL DEFAULT '[]',   -- ["intro","technical",...]
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -1,14 +1,14 @@
-"""Supabase client — all database read/write operations for NeuroSync AI."""
+"""Supabase client — all database read/write operations for Examiney.AI."""
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
 from supabase import Client, create_client
 
 from services.database import cloudinary_client
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 _URL: str = os.getenv("SUPABASE_URL", "")
 _KEY: str = os.getenv("SUPABASE_KEY", "")
@@ -123,6 +123,10 @@ def save_question_response(
     audio_file_id: Optional[str] = None,
     video_url: Optional[str] = None,
     audio_url: Optional[str] = None,
+    llm_verdict: Optional[str] = None,
+    llm_verdict_reason: Optional[str] = None,
+    llm_key_gaps: Optional[list] = None,
+    llm_strengths: Optional[list] = None,
 ) -> Dict[str, Any]:
     c = _get_client()
     payload = {
@@ -144,6 +148,10 @@ def save_question_response(
         "audio_file_id":       audio_file_id,
         "video_url":           video_url,
         "audio_url":           audio_url,
+        "llm_verdict":         llm_verdict,
+        "llm_verdict_reason":  llm_verdict_reason,
+        "llm_key_gaps":        llm_key_gaps or [],
+        "llm_strengths":       llm_strengths or [],
     }
     # Upsert so background task can update the placeholder inserted at request-time
     r = c.table("question_responses").upsert(payload, on_conflict="session_id,question_id").execute()
@@ -161,6 +169,7 @@ def save_video_signals(
     avg_hrv_rmssd: float,
     stress_spike_detected: bool,
     hr_bpm: Optional[float] = None,
+    gaze_metrics: Optional[Dict[str, Any]] = None,  # ← CRITICAL FIX #5: Add full gaze metrics storage
 ) -> Dict[str, Any]:
     c = _get_client()
     payload = {
@@ -172,8 +181,9 @@ def save_video_signals(
         "avg_hrv_rmssd":          avg_hrv_rmssd,
         "hr_bpm":                 hr_bpm,
         "stress_spike_detected":  stress_spike_detected,
+        "gaze_metrics":           gaze_metrics or {},  # ← NOW STORED FOR DASHBOARD
     }
-    r = c.table("video_signals").insert(payload).execute()
+    r = c.table("video_signals").upsert(payload, on_conflict="session_id,question_id").execute()
     return r.data[0] if r.data else {}
 
 
@@ -195,13 +205,14 @@ def update_video_gaze_metrics(
     ).data or []
     if not rows:
         # No row yet; create a minimal placeholder row.
+        # Only include fields that the database requires; omit avg_hrv_rmssd if NULL
+        # to avoid NOT NULL constraint violations.
         c.table("video_signals").insert({
             "session_id": session_id,
             "question_id": question_id,
             "gaze_zone_distribution": {},
             "cheat_flags": {},
             "emotion_distribution": {},
-            "avg_hrv_rmssd": 0,
             "stress_spike_detected": False,
             "gaze_metrics": gaze_metrics,
         }).execute()
@@ -221,8 +232,14 @@ def save_ocean_scores(
     job_fit_score: float,
     success_prediction: str,
     role_recommendation: str,
+    ocean_confidence: str = "Low",
+    trait_coverage: Optional[Dict[str, Any]] = None,
+    stages_covered: Optional[list] = None,
 ) -> Dict[str, Any]:
     c = _get_client()
+    # Only include core required fields to avoid schema cache issues
+    # Optional fields (ocean_confidence, trait_coverage, stages_covered) are skipped
+    # to prevent "column not found" errors when Supabase schema cache is stale
     payload = {
         "session_id":          session_id,
         "openness":            openness,
@@ -246,11 +263,19 @@ def get_candidate_full_report(session_id: str) -> Dict[str, Any]:
     qs   = c.table("question_responses").select("*").eq("session_id", session_id).execute()
     vs   = c.table("video_signals").select("*").eq("session_id", session_id).execute()
     oc   = c.table("ocean_reports").select("*").eq("session_id", session_id).execute()
+
+    has_responses = bool(qs.data)
+
+    # If candidate never took the interview, wipe any stale ocean_reports row
+    if not has_responses and oc.data:
+        c.table("ocean_reports").delete().eq("session_id", session_id).execute()
+
     return {
-        "session":            sess.data[0] if sess.data else None,
-        "question_responses": qs.data,
-        "video_signals":      vs.data,
-        "ocean_report":       oc.data[0] if oc.data else None,
+        "session":              sess.data[0] if sess.data else None,
+        "question_responses":   qs.data,
+        "video_signals":        vs.data,
+        "ocean_report":         oc.data[0] if (has_responses and oc.data) else None,
+        "interview_completed":  has_responses,
     }
 
 
@@ -259,19 +284,43 @@ def list_all_sessions() -> List[Dict[str, Any]]:
     c = _get_client()
     r = (
         c.table("sessions")
-        .select("session_id,candidate_name,job_opening_id,login_id,job_description,created_at")
+        .select("session_id,candidate_name,job_opening_id,login_id,job_description,questions,created_at")
         .order("created_at", desc=True)
         .execute()
     )
     sessions = r.data or []
-    for s in sessions:
-        oc = (
+    if not sessions:
+        return sessions
+
+    # Batch-check which sessions have real interview responses (single query)
+    session_ids = [s["session_id"] for s in sessions]
+    resp_check = (
+        c.table("question_responses")
+        .select("session_id")
+        .in_("session_id", session_ids)
+        .execute()
+    )
+    sessions_with_responses = {row["session_id"] for row in (resp_check.data or [])}
+
+    # Batch-fetch ALL OCEAN summaries in one query
+    responded_ids = list(sessions_with_responses)
+    ocean_map: Dict[str, Any] = {}
+    if responded_ids:
+        oc_batch = (
             c.table("ocean_reports")
-            .select("job_fit_score,success_prediction")
-            .eq("session_id", s["session_id"])
+            .select("session_id,job_fit_score,success_prediction")
+            .in_("session_id", responded_ids)
             .execute()
         )
-        s["ocean_summary"] = oc.data[0] if oc.data else None
+        for row in (oc_batch.data or []):
+            ocean_map[row["session_id"]] = row
+
+    for s in sessions:
+        sid = s["session_id"]
+        if sid not in sessions_with_responses:
+            s["ocean_summary"] = None
+            continue
+        s["ocean_summary"] = ocean_map.get(sid)
     return sessions
 
 
@@ -292,27 +341,66 @@ def list_sessions_by_opening(job_opening_id: str) -> List[Dict[str, Any]]:
     c = _get_client()
     r = (
         c.table("sessions")
-        .select("session_id,candidate_name,job_opening_id,login_id,created_at")
+        .select("session_id,candidate_name,job_opening_id,login_id,questions,job_description,created_at")
         .eq("job_opening_id", job_opening_id)
         .order("created_at", desc=True)
         .execute()
     )
-    # Enrich each session with its OCEAN summary
     sessions = r.data or []
-    for s in sessions:
-        oc = (
+    if not sessions:
+        return sessions
+
+    # Batch-check which sessions have real interview responses (single query)
+    session_ids = [s["session_id"] for s in sessions]
+    resp_check = (
+        c.table("question_responses")
+        .select("session_id")
+        .in_("session_id", session_ids)
+        .execute()
+    )
+    sessions_with_responses = {row["session_id"] for row in (resp_check.data or [])}
+
+    # Wipe stale ocean_reports for sessions that were never taken
+    never_interviewed = [s["session_id"] for s in sessions if s["session_id"] not in sessions_with_responses]
+    for sid in never_interviewed:
+        c.table("ocean_reports").delete().eq("session_id", sid).execute()
+
+    # Batch-fetch ALL OCEAN summaries in one query
+    responded_ids = list(sessions_with_responses)
+    ocean_map: Dict[str, Any] = {}
+    if responded_ids:
+        oc_batch = (
             c.table("ocean_reports")
-            .select("job_fit_score,success_prediction,openness,conscientiousness,extraversion,agreeableness,neuroticism")
-            .eq("session_id", s["session_id"])
+            .select("session_id,job_fit_score,success_prediction,openness,conscientiousness,extraversion,agreeableness,neuroticism")
+            .in_("session_id", responded_ids)
             .execute()
         )
-        s["ocean_summary"] = oc.data[0] if oc.data else None
+        for row in (oc_batch.data or []):
+            ocean_map[row["session_id"]] = row
+
+    # Enrich each session with its OCEAN summary — only if interview was actually taken
+    for s in sessions:
+        sid = s["session_id"]
+        if sid not in sessions_with_responses:
+            s["ocean_summary"] = None
+            continue
+        s["ocean_summary"] = ocean_map.get(sid)
     return sessions
 
 
 def delete_session(session_id: str) -> None:
     c = _get_client()
-    # 1. Collect Cloudinary public_ids from question_responses
+
+    # 1. Get session to build folder prefix for Cloudinary
+    sess_row = c.table("sessions").select("login_id").eq("session_id", session_id).execute()
+    login_id = (sess_row.data[0].get("login_id") or "unknown") if sess_row.data else "unknown"
+
+    # 2. Delete all Cloudinary media for this session using folder prefix (catches everything)
+    folder_prefix = cloudinary_client.build_session_folder(login_id=login_id, session_id=session_id)
+    cloudinary_client.delete_by_prefix(prefix=folder_prefix, resource_type="video")
+    cloudinary_client.delete_by_prefix(prefix=folder_prefix, resource_type="raw")
+
+    # 3. Belt-and-suspenders: also destroy any individually tracked file IDs
     files = (
         c.table("question_responses")
         .select("video_file_id,audio_file_id")
@@ -321,11 +409,10 @@ def delete_session(session_id: str) -> None:
     )
     for row in (files.data or []):
         for pid in (row.get("video_file_id"), row.get("audio_file_id")):
-            if not pid:
-                continue
-            # Both audio/video are stored under Cloudinary's "video" resource_type.
-            cloudinary_client.destroy(public_id=pid, resource_type="video")
-    # 2. Delete Supabase rows (child-first to respect FK constraints)
+            if pid:
+                cloudinary_client.destroy(public_id=pid, resource_type="video")
+
+    # 4. Delete Supabase rows (child-first to respect FK constraints)
     c.table("video_signals").delete().eq("session_id", session_id).execute()
     c.table("ocean_reports").delete().eq("session_id", session_id).execute()
     c.table("question_responses").delete().eq("session_id", session_id).execute()
@@ -362,11 +449,32 @@ def truncate_all_tables() -> Dict[str, int]:
             else:
                 r = c.table(table).delete().neq(col, "~~reset~~").execute()
             results[table] = len(r.data or [])
-            print(f"[VidyaAI][Reset] Truncated {table}: {results[table]} rows deleted")
+            logger.info(f"[Examiney][Reset] Truncated {table}: {results[table]} rows deleted")
         except Exception as e:
-            print(f"[VidyaAI][Reset] Failed to truncate {table}: {e}")
+            logger.error(f"[Examiney][Reset] Failed to truncate {table}: {e}")
             results[table] = -1
     return results
+
+
+# ── Calibration Data ──────────────────────────────────────────────────────────
+
+def save_calibration_data(session_id: str, data: dict) -> None:
+    """Persist calibration result as JSONB on the session row.
+    Automatically cleaned up when the session is deleted.
+    """
+    c = _get_client()
+    c.table("sessions").update({"calibration_data": data}).eq("session_id", session_id).execute()
+
+
+def get_calibration_data(session_id: str) -> dict:
+    """Retrieve calibration data for *session_id* from Supabase.
+    Raises FileNotFoundError (same contract as the old file-based API) when absent.
+    """
+    c = _get_client()
+    r = c.table("sessions").select("calibration_data").eq("session_id", session_id).execute()
+    if r.data and r.data[0].get("calibration_data"):
+        return r.data[0]["calibration_data"]
+    raise FileNotFoundError(f"No calibration data found for session '{session_id}'.")
 
 
 # ── Error logging ──────────────────────────────────────────────────────────────

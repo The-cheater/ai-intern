@@ -4,9 +4,13 @@ Key design principles
 ---------------------
 * Every raw iris coordinate is passed through the affine transform BEFORE
   zone classification — no hardcoded pixel offsets.
-* Horizontal-scan threshold = candidate_baseline_variance × 0.4 (not 0.02).
-* All risk levels are scaled by the neurodiversity_adjustment factor so that
-  candidates with naturally higher gaze variance are not unfairly penalised.
+* Signal 1 (horizontal scan): uses mean absolute x-DISPLACEMENT per frame
+  (same units as baseline_variance = mean displacement), not position variance.
+  Previous version compared position variance to displacement — dimensional mismatch.
+* Signal 3 (periodic scan): Hann window applied before FFT to suppress spectral
+  leakage.  Welch power-spectral-density then computed for more stable peak detection.
+* neurodiversity_adjustment applied in both the stateful CheatingDetector class
+  AND the stateless batch detect_cheating() function.
 * calibration_quality_score < 0.6 exposes `needs_recalibration = True`.
 """
 
@@ -57,16 +61,16 @@ class CheatingDetector:
         red_zone_patience: int = 45,
     ) -> None:
         cal = load_calibration(session_id)
-        self.transform_matrix: list       = cal["transform_matrix"]
-        self.baseline_variance: float     = cal["baseline_gaze_variance"]
-        self.neurodiversity_adjustment: float = cal["neurodiversity_adjustment"]
-        self.calibration_quality_score: float = cal["calibration_quality_score"]
+        self.transform_matrix: list            = cal["transform_matrix"]
+        self.baseline_variance: float          = cal["baseline_gaze_variance"]
+        self.neurodiversity_adjustment: float  = cal["neurodiversity_adjustment"]
+        self.calibration_quality_score: float  = cal["calibration_quality_score"]
 
-        # Personalised threshold: baseline_variance × 0.4 (replaces fixed 0.02)
-        self.h_scan_threshold: float = self.baseline_variance * 0.4
+        # Personalised threshold: 2× mean displacement = clear scan (not tiny tremor)
+        self.h_scan_threshold: float = self.baseline_variance * 2.0
 
         self._classifier   = ZoneClassifier(session_id)
-        self._zone_window: Deque[GazeZone]         = deque(maxlen=window_size)
+        self._zone_window: Deque[GazeZone]            = deque(maxlen=window_size)
         self._iris_window: Deque[Tuple[float, float]] = deque(maxlen=window_size)
         self._red_streak   = 0
         self._red_patience = red_zone_patience
@@ -75,20 +79,11 @@ class CheatingDetector:
 
     @property
     def needs_recalibration(self) -> bool:
-        """True when calibration quality is below the minimum acceptable threshold."""
         return self.calibration_quality_score < 0.6
 
     def process_frame(self, raw_iris: Tuple[float, float]) -> CheatingFlags:
-        """
-        Process one frame and return the current set of cheat flags.
-
-        Parameters
-        ----------
-        raw_iris : Raw image-normalised iris (x, y) from MediaPipe FaceMesh
-                   (average of landmarks 468 and 473).
-        """
-        # Apply affine transform to every coordinate before zone classification
-        _ = apply_transform(raw_iris, self.transform_matrix)   # kept for traceability
+        """Process one frame and return current cheat flags."""
+        _ = apply_transform(raw_iris, self.transform_matrix)
 
         prev_iris: Optional[Tuple[float, float]] = (
             self._iris_window[-1] if self._iris_window else None
@@ -113,20 +108,16 @@ class CheatingDetector:
             calibration_quality_low=self.needs_recalibration,
         )
 
-        # Sustained red zone
         flags.sustained_red_zone = self._red_streak >= self._red_patience
 
-        # Horizontal scan: x-variance in recent raw iris window vs personalised threshold
+        # Horizontal scan: mean absolute x-displacement vs personalised threshold
         if len(self._iris_window) >= 10:
             recent = np.array(list(self._iris_window)[-30:])
-            x_var = float(np.var(recent[:, 0]))
-            flags.horizontal_scan_detected = x_var > self.h_scan_threshold
+            x_disp_mean = float(np.abs(np.diff(recent[:, 0])).mean())
+            flags.horizontal_scan_detected = x_disp_mean > self.h_scan_threshold
 
-        # Rapid single-frame displacement vs candidate baseline
         flags.rapid_gaze_shift = self._detect_rapid_shift()
 
-        # Risk level — divide flag count by neurodiversity_adjustment so that
-        # candidates with higher natural variance are not penalised unfairly
         n_flags = sum([
             flags.horizontal_scan_detected,
             flags.sustained_red_zone,
@@ -141,7 +132,6 @@ class CheatingDetector:
         return flags
 
     def _detect_rapid_shift(self) -> bool:
-        """True when the last frame-to-frame displacement > 3 × baseline variance."""
         if len(self._iris_window) < 2:
             return False
         iris_list = list(self._iris_window)
@@ -156,21 +146,26 @@ class CheatingDetector:
 def detect_cheating(
     gaze_points: List[Tuple[float, float]],
     baseline_variance: float = 0.004,
+    neurodiversity_adjustment: float = 1.0,
 ) -> dict:
     """
     Stateless batch cheating detector for one question's gaze samples.
 
-    Runs 9 independent signal detectors and aggregates a risk score:
+    Runs 9 independent signal detectors and aggregates a risk score.
+    neurodiversity_adjustment divides the final score to avoid penalising
+    candidates with naturally higher gaze variance (consistent with the
+    stateful CheatingDetector class).
 
-    1.  Horizontal scan          — high x-variance
-    2.  Rapid gaze jumps         — frame-to-frame displacement spike
-    3.  Periodic scan (FFT)      — rhythmic x-motion = text reading
-    4.  Directional sweeps       — L→R→L reversals = reading lines
-    5.  Gaze freeze              — abnormally low variance (fixating external notes)
-    6.  Extreme lateral gaze     — looking far left/right (phone/notes)
-    7.  Robotic velocity         — too-uniform movement speed (scripted scan)
-    8.  Linear reading traj.     — gaze moves in a straight horizontal line
-    9.  Sustained downward gaze  — looking at lap/phone
+    Signal weights (max total = 13):
+    1.  Horizontal scan (x-displacement)  weight=1
+    2.  Rapid gaze jumps                  weight=1
+    3.  Periodic scan — Hann+Welch FFT    weight=2  (strong signal)
+    4.  Directional sweeps (L→R→L)        weight=1
+    5.  Gaze freeze                       weight=2  (very suspicious)
+    6.  Extreme lateral gaze              weight=1
+    7.  Robotic velocity consistency      weight=2  (strong signal)
+    8.  Linear reading trajectory         weight=2  (strong signal)
+    9.  Sustained downward gaze           weight=1
     """
     if len(gaze_points) < 5:
         return {"risk_level": "low", "cheat_score": 0, "reason": "insufficient_data"}
@@ -178,14 +173,20 @@ def detect_cheating(
     pts = np.array(gaze_points, dtype=float)   # shape (N, 2)
     N   = len(pts)
     flags: dict = {}
-    score = 0   # evidence accumulator — thresholds below are weighted
+    score = 0
 
     # ── 1. Horizontal scan ─────────────────────────────────────────────────────
-    x_var = float(np.var(pts[:, 0]))
-    h_scan = x_var > baseline_variance * 0.4
-    flags["horizontal_scan"] = h_scan
-    if h_scan:
-        score += 1
+    # Compare mean absolute x-DISPLACEMENT (same unit as baseline_variance)
+    # NOT position variance (different unit — caused false positives).
+    if N >= 2:
+        x_disp_mean = float(np.abs(np.diff(pts[:, 0])).mean())
+        h_scan = x_disp_mean > baseline_variance * 2.0
+        flags["horizontal_scan"]   = h_scan
+        flags["x_disp_mean"]       = round(x_disp_mean, 5)
+        if h_scan:
+            score += 1
+    else:
+        flags["horizontal_scan"] = False
 
     # ── 2. Rapid gaze jumps ────────────────────────────────────────────────────
     if N >= 2:
@@ -195,48 +196,70 @@ def detect_cheating(
         if rapid_shift:
             score += 1
 
-    # ── 3. Periodic scan via FFT ───────────────────────────────────────────────
-    # Reading text produces rhythmic left-right sweeps at 0.3–3.5 Hz.
+    # ── 3. Periodic scan — Hann-windowed Welch PSD ────────────────────────────
+    # Hann window eliminates spectral leakage that caused false "reading" flags
+    # with the previous bare rfft.  Welch PSD averages over overlapping windows
+    # for a more stable spectral estimate.
     # Gaze samples arrive at ~12.5 fps (80 ms frontend timeslice).
     if N >= 16:
         x_c = pts[:, 0] - pts[:, 0].mean()
-        fft_mag = np.abs(np.fft.rfft(x_c))
-        fft_mag[0] = 0  # kill DC component
-        freqs = np.fft.rfftfreq(N, d=0.08)   # 0.08 s per sample
-        band  = (freqs >= 0.3) & (freqs <= 3.5)
-        if band.any():
-            peak_power  = float(fft_mag[band].max())
-            total_power = float(fft_mag[1:].sum()) + 1e-9
-            periodic_ratio = peak_power / total_power
-            flags["periodic_scan"]   = periodic_ratio > 0.35
-            flags["periodic_ratio"]  = round(periodic_ratio, 3)
-            if flags["periodic_scan"]:
-                score += 2   # strong signal — weighted double
+        try:
+            from scipy.signal import welch
+            # nperseg = min(N, 32) gives ~5 freq bins in the cardiac band
+            nperseg = min(N, max(16, N // 2))
+            freqs_w, psd = welch(x_c, fs=12.5, nperseg=nperseg, window="hann")
+            band = (freqs_w >= 0.3) & (freqs_w <= 3.5)
+            if band.any():
+                peak_power  = float(psd[band].max())
+                total_power = float(psd.sum()) + 1e-9
+                periodic_ratio = peak_power / total_power
+                flags["periodic_scan"]  = periodic_ratio > 0.40
+                flags["periodic_ratio"] = round(periodic_ratio, 3)
+                if flags["periodic_scan"]:
+                    score += 2
+        except Exception:
+            # scipy unavailable — fall back to Hann-windowed rfft
+            window  = np.hanning(N)
+            x_win   = x_c * window
+            fft_mag = np.abs(np.fft.rfft(x_win))
+            fft_mag[0] = 0
+            freqs = np.fft.rfftfreq(N, d=0.08)
+            band  = (freqs >= 0.3) & (freqs <= 3.5)
+            if band.any():
+                peak_power  = float(fft_mag[band].max())
+                total_power = float(fft_mag[1:].sum()) + 1e-9
+                periodic_ratio = peak_power / total_power
+                flags["periodic_scan"]  = periodic_ratio > 0.40
+                flags["periodic_ratio"] = round(periodic_ratio, 3)
+                if flags.get("periodic_scan", False):
+                    score += 2
 
     # ── 4. Directional sweeps (L→R→L reversal count) ──────────────────────────
     if N >= 10:
-        x_deltas   = np.diff(pts[:, 0])
-        significant = x_deltas[np.abs(x_deltas) > 0.015]   # ignore micro-tremor
+        x_deltas    = np.diff(pts[:, 0])
+        significant = x_deltas[np.abs(x_deltas) > 0.015]
         if len(significant) >= 4:
             sign_changes = int(np.sum(np.diff(np.sign(significant)) != 0))
-            sweep_hz = sign_changes / max(N * 0.08, 1e-3)   # reversals per second
+            sweep_hz = sign_changes / max(N * 0.08, 1e-3)
             directional_sweep = 0.5 <= sweep_hz <= 5.0
             flags["directional_sweep"] = directional_sweep
             flags["sweep_rate_hz"]     = round(sweep_hz, 2)
             if directional_sweep:
                 score += 1
 
-    # ── 5. Gaze freeze (suspiciously low total variance) ──────────────────────
-    # Candidate is staring at a fixed off-screen point (notes on desk, phone).
+    # ── 5. Gaze freeze (suspiciously low total displacement variance) ──────────
+    # Uses mean displacement (same units as baseline_variance) rather than
+    # position variance to avoid the coordinate-space mismatch.
     if N >= 10:
-        total_var   = float(np.var(pts))
-        gaze_frozen = total_var < baseline_variance * 0.08
+        all_disps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        mean_disp = float(all_disps.mean())
+        gaze_frozen = mean_disp < baseline_variance * 0.05
         flags["gaze_freeze"] = gaze_frozen
+        flags["mean_displacement"] = round(mean_disp, 5)
         if gaze_frozen:
-            score += 2   # very suspicious — weighted double
+            score += 2
 
     # ── 6. Extreme lateral gaze ────────────────────────────────────────────────
-    # Looking far left (<12 %) or far right (>88 %) = off-screen reference.
     if N >= 5:
         ext_left  = float(np.mean(pts[:, 0] < 0.12))
         ext_right = float(np.mean(pts[:, 0] > 0.88))
@@ -249,38 +272,37 @@ def detect_cheating(
 
     # ── 7. Robotic velocity consistency ───────────────────────────────────────
     # Natural gaze: mix of fast saccades + slow fixations → high velocity CV.
-    # Scripted/robotic scanning: unnaturally uniform speed → low CV.
+    # Scripted/robotic: unnaturally uniform speed → low CV.
     if N >= 10:
         velocities = np.linalg.norm(np.diff(pts, axis=0), axis=1)
         mean_vel   = float(velocities.mean()) + 1e-9
-        vel_cv     = float(velocities.std()) / mean_vel   # coefficient of variation
-        robotic    = vel_cv < 0.25 and mean_vel > 0.005   # moving but too uniformly
+        vel_cv     = float(velocities.std()) / mean_vel
+        robotic    = vel_cv < 0.25 and mean_vel > baseline_variance * 0.5
         flags["robotic_velocity"] = robotic
         flags["velocity_cv"]      = round(vel_cv, 3)
         if robotic:
-            score += 2   # strong signal — weighted double
+            score += 2
 
     # ── 8. Linear reading trajectory ──────────────────────────────────────────
-    # Gaze drifts monotonically in x while y stays flat = reading a text line.
     if N >= 12:
         try:
-            t = np.arange(N, dtype=float)
-            coeffs    = np.polyfit(t, pts[:, 0], 1)
-            pred_x    = np.polyval(coeffs, t)
-            res_var   = float(np.var(pts[:, 0] - pred_x))
+            t        = np.arange(N, dtype=float)
+            coeffs   = np.polyfit(t, pts[:, 0], 1)
+            pred_x   = np.polyval(coeffs, t)
+            res_var  = float(np.var(pts[:, 0] - pred_x))
             x_var_tot = float(np.var(pts[:, 0])) + 1e-9
             linearity = 1.0 - res_var / x_var_tot
             y_var     = float(np.var(pts[:, 1]))
-            linear_read = linearity > 0.75 and y_var < baseline_variance * 0.5
+            # y_var threshold: displacement-based to match coordinate space
+            linear_read = linearity > 0.75 and y_var < (baseline_variance ** 2) * 5.0
             flags["linear_reading_trajectory"] = linear_read
             flags["trajectory_linearity"]      = round(linearity, 3)
             if linear_read:
-                score += 2   # strong signal
+                score += 2
         except Exception:
             pass
 
     # ── 9. Sustained downward gaze ─────────────────────────────────────────────
-    # Looking down (y > 0.80) = phone on lap or notes on desk.
     if N >= 5:
         down_frac = float(np.mean(pts[:, 1] > 0.80))
         flags["sustained_downward_gaze"] = down_frac > 0.20
@@ -288,16 +310,18 @@ def detect_cheating(
         if down_frac > 0.20:
             score += 1
 
-    # ── Risk level ─────────────────────────────────────────────────────────────
-    # Max possible score = 1+1+2+1+2+1+2+2+1 = 13
-    # high ≥ 5, medium ≥ 2, low < 2
-    if score >= 5:
+    # ── Risk level (neurodiversity-adjusted) ───────────────────────────────────
+    # Divide by neurodiversity_adjustment so candidates with naturally higher
+    # gaze variance are not unfairly penalised (same logic as stateful class).
+    effective_score = score / max(neurodiversity_adjustment, 1.0)
+    if effective_score >= 5:
         risk_level = "high"
-    elif score >= 2:
+    elif effective_score >= 2:
         risk_level = "medium"
     else:
         risk_level = "low"
 
-    flags["risk_level"]  = risk_level
-    flags["cheat_score"] = score
+    flags["risk_level"]       = risk_level
+    flags["cheat_score"]      = score
+    flags["effective_score"]  = round(effective_score, 2)
     return flags

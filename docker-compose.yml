@@ -4,7 +4,7 @@ services:
   # ── FastAPI backend ──────────────────────────────────────────────────────────
   api:
     build: .
-    container_name: neurosync-api
+    container_name: vidyaai-api
     ports:
       - "8000:8000"
     env_file:
@@ -12,11 +12,11 @@ services:
     environment:
       # Inside Docker, Ollama is reachable at the ollama service hostname
       OLLAMA_URL: http://ollama:11434
+      # Override CORS origins for your actual frontend domain in production
+      CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
     volumes:
-      # Persist calibration and output files across restarts
+      # Persist calibration and output files across container restarts
       - ./outputs:/app/outputs
-      # Mount service-account key as read-only
-      - ./ai-intern-489710-129aed4e17ac.json:/app/ai-intern-489710-129aed4e17ac.json:ro
     depends_on:
       ollama:
         condition: service_healthy
@@ -25,7 +25,7 @@ services:
   # ── Ollama LLM server ────────────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
-    container_name: neurosync-ollama
+    container_name: vidyaai-ollama
     ports:
       - "11434:11434"
     volumes:

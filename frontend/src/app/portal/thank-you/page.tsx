@@ -1,168 +1,243 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import { CheckCircle2, Home, Loader2, Brain } from "lucide-react";
-import Link from "next/link";
+import { motion, AnimatePresence } from "framer-motion";
+import { CheckCircle2, Loader2, LogOut } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const POLL_INTERVAL_MS = 8000;
-const MAX_POLLS = 40;  // ~5 min max
 
-type Stage = "starting" | "processing" | "done" | "error";
+// How long after "done" before auto-logout (ms)
+const AUTO_LOGOUT_MS = 60_000;
+// Max time to wait for processing before forcing logout (ms)
+const PROCESSING_TIMEOUT_MS = 60_000;
+// Status poll interval
+const POLL_MS = 4_000;
+
+type Phase = "processing" | "done";
 
 export default function ThankYou() {
-    const [sessionId, setSessionId]  = useState("");
-    const [stage, setStage]          = useState<Stage>("starting");
-    const [pollNote, setPollNote]    = useState("");
+    const router            = useRouter();
+    const didFireRef        = useRef(false);
+    const sidRef            = useRef<string>("");
+    const pollTimerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+    const timeoutRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const logoutTimerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    const pollTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-    const pollCountRef  = useRef(0);
-    const didFireRef    = useRef(false);  // prevent React StrictMode double-fire
+    const [phase,         setPhase]         = useState<Phase>("processing");
+    const [logoutSecs,    setLogoutSecs]    = useState(AUTO_LOGOUT_MS / 1000);
+    const [logoutPaused,  setLogoutPaused]  = useState(false);
+    const logoutPausedRef = useRef(false);
 
+    // Keep ref in sync so the setInterval closure can read it without stale closure
+    logoutPausedRef.current = logoutPaused;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    const stopPolling = () => {
+        if (pollTimerRef.current)  { clearInterval(pollTimerRef.current);  pollTimerRef.current  = null; }
+        if (timeoutRef.current)    { clearTimeout(timeoutRef.current);     timeoutRef.current    = null; }
+    };
+
+    const forceLogout = () => {
+        sessionStorage.removeItem("examiney_session");
+        sessionStorage.removeItem("examiney_calibration");
+        router.replace("/portal/login");
+    };
+
+    const startLogoutCountdown = () => {
+        setLogoutSecs(AUTO_LOGOUT_MS / 1000);
+        logoutTimerRef.current = setInterval(() => {
+            if (logoutPausedRef.current) return;
+            setLogoutSecs(s => {
+                if (s <= 1) {
+                    clearInterval(logoutTimerRef.current!);
+                    forceLogout();
+                    return 0;
+                }
+                return s - 1;
+            });
+        }, 1000);
+    };
+
+    const transitionToDone = (force: boolean = false) => {
+        stopPolling();
+        if (force) {
+            forceLogout();
+            return;
+        }
+        setPhase("done");
+        startLogoutCountdown();
+    };
+
+    // ── On mount: grab session, trigger processing, start polling ─────────────
     useEffect(() => {
         if (didFireRef.current) return;
         didFireRef.current = true;
 
-        const raw = sessionStorage.getItem("neurosync_session");
-        if (!raw) { setStage("error"); return; }
+        const raw = sessionStorage.getItem("examiney_session");
+        if (!raw) { router.replace("/portal/login"); return; }
 
-        const parsed = JSON.parse(raw) as { session_id?: string };
-        const sid = parsed?.session_id;
-        if (!sid) { setStage("error"); return; }
+        let sid: string;
+        try {
+            sid = (JSON.parse(raw) as { session_id?: string })?.session_id ?? "";
+        } catch { router.replace("/portal/login"); return; }
+        if (!sid) { router.replace("/portal/login"); return; }
 
-        setSessionId(sid);
-        console.log("[ThankYou] Firing background pipeline for session=", sid);
+        sidRef.current = sid;
 
-        const kickoff = async () => {
+        // Trigger post-session pipeline
+        fetch(`${API}/session/${sid}/process`, { method: "POST" }).catch((err) => {
+            console.error("[ThankYou] Failed to trigger processing:", err);
+        });
+
+        // Poll status until ready or timeout
+        const poll = async () => {
             try {
-                const r = await fetch(`${API}/session/${sid}/process`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                });
-                console.log("[ThankYou] /process responded:", r.status);
-            } catch (err) {
-                console.error("[ThankYou] /process failed:", err);
+                const res = await fetch(`${API}/session/${sid}/status`);
+                if (!res.ok) return;
+                const data = await res.json();
+
+                if (data.status === "ready") {
+                    transitionToDone();
+                }
+            } catch {
+                // network blip — keep polling
             }
-            setStage("processing");
-            startPolling(sid);
         };
-        kickoff();
+
+        poll(); // immediate first check
+        pollTimerRef.current = setInterval(poll, POLL_MS);
+
+        // Hard timeout — show done even if backend never reports ready
+        timeoutRef.current = setTimeout(() => transitionToDone(true), PROCESSING_TIMEOUT_MS);
 
         return () => {
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+            stopPolling();
+            if (logoutTimerRef.current) clearInterval(logoutTimerRef.current);
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    function startPolling(sid: string) {
-        console.log("[ThankYou] Starting polling for session=", sid);
-        pollTimerRef.current = setInterval(async () => {
-            pollCountRef.current += 1;
-            try {
-                const r = await fetch(`${API}/session/${sid}/status`);
-                if (!r.ok) return;
-                const data = await r.json();
-                console.log(`[ThankYou] Poll #${pollCountRef.current}: status=${data.status}`);
-
-                if (data.status === "ready") {
-                    clearInterval(pollTimerRef.current!);
-                    pollTimerRef.current = null;
-                    setStage("done");
-                    sessionStorage.removeItem("neurosync_session");
-                } else if (data.status === "processing") {
-                    const done = data.transcripts_done ?? 0;
-                    const total = data.questions_total ?? "?";
-                    setPollNote(`Transcripts: ${done}/${total} complete`);
-                }
-            } catch (err) {
-                console.warn("[ThankYou] Poll error:", err);
-            }
-
-            if (pollCountRef.current >= MAX_POLLS) {
-                clearInterval(pollTimerRef.current!);
-                pollTimerRef.current = null;
-                setStage("done");  // show done even without OCEAN — recruiter sees it in dashboard
-                sessionStorage.removeItem("neurosync_session");
-            }
-        }, POLL_INTERVAL_MS);
-    }
-
+    // ── Render ────────────────────────────────────────────────────────────────
     return (
-        <div className="min-h-screen bg-[#f5f1eb] flex flex-col items-center justify-center p-8 text-center relative overflow-hidden font-body text-foreground">
-            <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                <div className="absolute top-[20%] left-[20%] w-[50%] h-[50%] bg-emerald-500/5 blur-[150px] rounded-full" />
-                <div className="absolute bottom-[20%] right-[20%] w-[40%] h-[40%] bg-indigo-500/5 blur-[130px] rounded-full" />
-            </div>
+        <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-8 text-center font-body text-foreground">
+            <AnimatePresence mode="wait">
 
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.8 }} className="max-w-2xl w-full relative z-10">
-
-                {/* ── Processing ──────────────────────────────────────── */}
-                {(stage === "starting" || stage === "processing") && (
-                    <div className="flex flex-col items-center gap-8 py-24">
-                        <div className="relative w-20 h-20">
-                            <Loader2 className="w-20 h-20 text-indigo-400 animate-spin absolute" strokeWidth={1} />
-                            <Brain className="w-8 h-8 text-indigo-600 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" strokeWidth={1.5} />
+                {/* Processing */}
+                {phase === "processing" && (
+                    <motion.div
+                        key="processing"
+                        initial={{ opacity: 0, y: 16 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        className="max-w-sm w-full flex flex-col items-center"
+                    >
+                        <div className="w-14 h-14 rounded-xl bg-white border border-border flex items-center justify-center mb-6 shadow-sm">
+                            <Loader2 size={24} className="text-primary animate-spin" strokeWidth={1.5} />
                         </div>
-                        <div className="space-y-3">
-                            <h2 className="font-heading text-3xl font-black text-foreground/80">
-                                {stage === "starting" ? "Submitting Responses…" : "AI Analysis Running"}
-                            </h2>
-                            <p className="text-foreground/50 text-base">
-                                {stage === "starting"
-                                    ? "Your recordings are being securely uploaded."
-                                    : "Transcribing audio and computing your assessment in the background."}
-                            </p>
-                            {pollNote && <p className="text-foreground/30 text-sm">{pollNote}</p>}
-                        </div>
-                        <p className="text-foreground/25 text-xs max-w-xs leading-relaxed">
-                            This takes 2–5 minutes. You can safely leave this page — your recruiter will see the results shortly.
+                        <h1 className="font-heading text-xl font-semibold mb-2">Processing Your Interview</h1>
+                        <p className="text-foreground/50 text-sm leading-relaxed">
+                            Please keep this window open. This usually takes under a minute.
                         </p>
-                    </div>
+                    </motion.div>
                 )}
 
-                {/* ── Done / Error ────────────────────────────────────── */}
-                {(stage === "done" || stage === "error") && (
-                    <>
-                        <div className="w-24 h-24 bg-emerald-500/10 text-emerald-500 rounded-[2.5rem] flex items-center justify-center border border-emerald-500/20 mx-auto mb-12 shadow-[0_0_40px_rgba(34,197,94,0.12)]">
-                            <CheckCircle2 size={48} strokeWidth={1.5} />
-                        </div>
+                {/* Done */}
+                {phase === "done" && (
+                    <motion.div
+                        key="done"
+                        initial={{ opacity: 0, scale: 0.97 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="max-w-sm w-full flex flex-col items-center"
+                    >
+                        <motion.div
+                            initial={{ scale: 0.7, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            transition={{ delay: 0.1, type: "spring", stiffness: 200 }}
+                            className="w-14 h-14 bg-emerald-50 text-emerald-500 rounded-xl flex items-center justify-center border border-emerald-200 mb-6"
+                        >
+                            <CheckCircle2 size={28} strokeWidth={1.5} />
+                        </motion.div>
 
-                        <h1 className="font-heading text-6xl font-black mb-6 tracking-tighter leading-tight italic">
-                            Interview Complete
-                        </h1>
-                        <p className="text-foreground/55 text-xl italic mb-16 px-8 leading-relaxed font-black opacity-80">
-                            Your responses have been submitted for AI review.<br />
-                            Your recruiter will review the results and contact you shortly.
-                        </p>
+                        <motion.h1
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.2 }}
+                            className="font-heading text-2xl font-semibold mb-2"
+                        >
+                            Interview Submitted
+                        </motion.h1>
 
-                        {/* Session reference — the only score-related info candidate sees */}
-                        {sessionId && (
-                            <div className="bg-white p-10 rounded-[2.5rem] border border-border shadow-md relative mb-12 group">
-                                <div className="absolute top-0 right-0 p-4">
-                                    <div className="bg-indigo-500/10 text-indigo-600 px-3 py-1 rounded-full text-[10px] font-heading font-black tracking-widest uppercase">Verified</div>
-                                </div>
-                                <p className="text-foreground/40 text-xs uppercase tracking-widest mb-4 font-black italic">
-                                    Secure Session Reference ID
-                                </p>
-                                <p className="font-heading text-3xl font-black text-foreground italic tracking-tighter transition-all group-hover:text-indigo-500">
-                                    {sessionId}
-                                </p>
+                        <motion.p
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.3 }}
+                            className="text-foreground/50 text-sm mb-1 leading-relaxed"
+                        >
+                            Your responses have been recorded successfully.
+                        </motion.p>
+
+                        <motion.p
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.4 }}
+                            className="text-foreground/40 text-sm mb-8 leading-relaxed"
+                        >
+                            The hiring team will be in touch about next steps.
+                        </motion.p>
+
+                        {/* Auto-logout countdown */}
+                        <motion.div
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.5 }}
+                            className="w-full mb-4 px-5 py-4 rounded-xl border border-border bg-white flex flex-col items-center gap-2.5"
+                        >
+                            <div className="flex items-center gap-2 text-foreground/40 text-xs">
+                                <LogOut size={13} />
+                                <span>
+                                    {logoutPaused
+                                        ? "Auto-logout paused"
+                                        : `Logging out in ${logoutSecs}s`}
+                                </span>
                             </div>
-                        )}
+                            {!logoutPaused && (
+                                <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
+                                    <motion.div
+                                        className="h-full bg-emerald-400 rounded-full"
+                                        initial={{ width: "100%" }}
+                                        animate={{ width: `${(logoutSecs / (AUTO_LOGOUT_MS / 1000)) * 100}%` }}
+                                        transition={{ duration: 1, ease: "linear" }}
+                                    />
+                                </div>
+                            )}
+                            <button
+                                onClick={() => setLogoutPaused(p => !p)}
+                                className="text-xs text-foreground/30 hover:text-foreground/60 transition-colors"
+                            >
+                                {logoutPaused ? "Resume" : "Stay on this page"}
+                            </button>
+                        </motion.div>
 
-                        <Link href="/portal/login"
-                            className="px-10 py-5 bg-white hover:bg-gray-50 border border-border rounded-2xl flex items-center gap-3 mx-auto w-fit transition-all font-heading font-black text-sm uppercase tracking-widest text-foreground/60 hover:text-foreground shadow-sm">
-                            <Home size={18} /> Exit Portal
-                        </Link>
-
-                        <p className="mt-16 text-foreground/25 text-[10px] uppercase tracking-[0.3em] font-black italic">
-                            Vidya AI &copy; 2025. All sessions are encrypted and stored for audit compliance.
-                        </p>
-                    </>
+                        <motion.button
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 0.6 }}
+                            onClick={() => {
+                                sessionStorage.removeItem("examiney_session");
+                                sessionStorage.removeItem("examiney_calibration");
+                                router.replace("/portal/login");
+                            }}
+                            className="w-full px-6 py-3 bg-white hover:bg-gray-50 border border-border rounded-xl inline-flex items-center justify-center gap-2 transition-all text-sm font-ui font-medium text-foreground/60 hover:text-foreground"
+                        >
+                            <LogOut size={15} /> Sign Out
+                        </motion.button>
+                    </motion.div>
                 )}
-            </motion.div>
+
+            </AnimatePresence>
         </div>
     );
 }

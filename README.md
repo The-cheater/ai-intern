@@ -1,6 +1,6 @@
-# VidyaAI — AI-Powered Interview Intelligence Platform
+# Examiney.AI — AI-Powered Interview Intelligence Platform
 
-VidyaAI is a full-stack, multi-modal AI platform that automates the interview process from resume parsing through candidate evaluation. It combines speech recognition, computer vision, physiological signal analysis, and large language model scoring to produce a structured psychological and technical assessment of every candidate — delivered to recruiters through a live dashboard.
+Examiney.AI is a full-stack, multi-modal AI platform that automates the interview process from resume parsing through candidate evaluation. It combines speech recognition, computer vision, physiological signal analysis, and large language model scoring to produce a structured psychological and technical assessment of every candidate — delivered to recruiters through a live dashboard.
 
 ---
 
@@ -18,13 +18,15 @@ VidyaAI is a full-stack, multi-modal AI platform that automates the interview pr
 10. [Media Storage](#10-media-storage)
 11. [Environment Configuration](#11-environment-configuration)
 12. [Setup and Installation](#12-setup-and-installation)
-13. [Known Issues and Fixes](#13-known-issues-and-fixes)
+13. [Production Deployment](#13-production-deployment)
+14. [Security Considerations](#14-security-considerations)
+15. [Known Issues and Fixes](#15-known-issues-and-fixes)
 
 ---
 
 ## 1. System Overview
 
-VidyaAI removes subjectivity from hiring by running every candidate through an identical, AI-scored interview. The platform operates across two user-facing interfaces:
+Examiney.AI removes subjectivity from hiring by running every candidate through an identical, AI-scored interview. The platform operates across two user-facing interfaces:
 
 **Recruiter Dashboard** — The interviewer creates a job opening, uploads a resume or job description, and receives a shareable candidate login link. After each interview, the dashboard shows a full Digital Candidate Twin: OCEAN personality scores, job-fit percentage, per-question transcripts, gaze analytics, physiological stress signals, and embedded video/audio playback.
 
@@ -102,21 +104,20 @@ VidyaAI removes subjectivity from hiring by running every candidate through an i
 | Language Runtime | Python 3.11 | All backend services |
 | Data Validation | Pydantic v2 | Request/response models, strict typing |
 | PDF Parsing | IBM Docling 2.x | Structured resume extraction to Markdown |
-| LLM (Primary) | Google Gemini Flash | Question generation, OCEAN role recommendation |
+| LLM (Primary) | Google Gemini Flash | Question generation, LLM evaluation, OCEAN role recommendation |
 | LLM (Fallback) | Ollama + Qwen2.5:0.5b | Local inference when Gemini is unavailable |
 | Speech-to-Text | OpenAI Whisper (small) | Audio transcription, serialised via threading.Lock |
 | Semantic Scoring | sentence-transformers all-MiniLM-L6-v2 | Cosine similarity between transcript and ideal answer |
-| Sentiment Scoring | VADER SentimentIntensityAnalyzer | Compound sentiment of candidate transcripts |
+| Sentiment Scoring | VADER SentimentIntensityAnalyzer | Compound sentiment signal (10% weight in combined score) |
 | Gaze Tracking | MediaPipe FaceMesh (browser) | Real-time iris landmark detection during interview |
 | Post-Session Gaze | GazeFollower 1.0.2 | Appearance-based gaze model on recorded video |
 | Face Landmark | MediaPipe (Python) | Calibration affine transform computation |
 | Emotion Analysis | DeepFace | 8-class facial emotion classification per video chunk |
 | Physiological Signals | CHROM rPPG (OpenCV + NumPy) | Heart rate and HRV RMSSD from webcam footage |
-| Cheating Detection | Custom (NumPy + SciPy) | 9-signal FFT-based scan pattern + fixation analysis |
+| Cheating Detection | Custom (NumPy + FFT) | 9-signal FFT-based scan pattern + fixation analysis |
 | Password Hashing | bcrypt 4.0.1 (direct) | Candidate credential hashing |
-| HTTP Client | httpx | Internal service calls (finalize, download) |
+| HTTP Client | httpx | External LLM API calls, media download |
 | Environment | python-dotenv | .env loading |
-| Testing | pytest + pytest-asyncio | Unit and integration tests |
 
 ### Frontend
 
@@ -138,7 +139,7 @@ VidyaAI removes subjectivity from hiring by running every candidate through an i
 |---------|------------|---------|
 | Database | Supabase (PostgreSQL) | All structured data, JSONB for gaze/emotion/OCEAN |
 | Media Storage | Cloudinary | Video and audio CDN, deterministic public_id naming |
-| Local LLM | Ollama | Self-hosted Qwen2.5 model server |
+| Local LLM | Ollama | Self-hosted Qwen2.5 model server (fallback only) |
 
 ---
 
@@ -156,14 +157,14 @@ e:/ai-intern/
 │   │
 │   ├── question_gen/
 │   │   ├── models.py                   # InterviewScript, Question, AnswerKey
-│   │   ├── prompts.py                  # System prompt + build_user_prompt()
+│   │   ├── prompts.py                  # System prompt + build_batch_prompt()
 │   │   └── generator.py               # generate_questions() → Gemini / Ollama
 │   │
 │   ├── scoring/
 │   │   ├── models.py                   # ResponseScore, SentimentScores, OceanReport
-│   │   ├── response_scorer.py          # Whisper transcript → semantic + VADER scoring
+│   │   ├── response_scorer.py          # Transcript → semantic + VADER scoring
 │   │   ├── ocean_mapper.py             # OCEAN trait mapping + job-fit cosine similarity
-│   │   └── llm_marker.py              # LLM-as-judge for qualitative scoring
+│   │   └── llm_marker.py              # LLM judge (verdict) + dimension marker (5 scores)
 │   │
 │   ├── video_analysis/
 │   │   ├── calibration/
@@ -177,8 +178,7 @@ e:/ai-intern/
 │   │
 │   └── database/
 │       ├── supabase_client.py          # All Supabase read/write operations
-│       ├── cloudinary_client.py        # Upload, delete, naming, prefix delete
-│       └── models.py                   # Shared DB models
+│       └── cloudinary_client.py        # Upload, delete, naming, prefix delete
 │
 ├── frontend/
 │   └── src/app/
@@ -197,14 +197,12 @@ e:/ai-intern/
 │           │   └── OpeningDetailClient.tsx  # Candidate table, process/delete/add
 │           └── candidates/[id]/page.tsx    # Digital Candidate Twin profile
 │
-├── tests/
-│   ├── conftest.py
-│   ├── test_ocean_mapper.py
-│   ├── test_parser.py
-│   ├── test_question_gen.py
-│   └── test_scorer.py
+├── outputs/                            # Runtime output (calibration JSONs, OCEAN reports)
+│   └── calibration/                    # Per-session calibration data — volume-mounted
 │
-├── supabase_migration.sql              # Safe incremental migration (run in SQL Editor)
+├── Dockerfile                          # Single-worker container (model safety)
+├── docker-compose.yml                  # API + Ollama services
+├── supabase_schema.sql                 # Safe incremental schema (run in Supabase SQL Editor)
 ├── requirements.txt                    # Python dependencies
 └── .env                                # Environment variables (never commit)
 ```
@@ -223,9 +221,9 @@ Recruiter pastes JD    →  POST /parse/text →  regex extraction
                           ↓
                      POST /generate-questions
                      Gemini Flash (or Qwen2.5 fallback)
-                     18-20 questions across 4 stages:
-                       intro / technical / behavioral / situational
-                     Each question includes ideal_answer
+                     18-20 questions across 5 stages:
+                       intro / technical / behavioral / logical / situational
+                     Each question includes ideal_answer + answer_key
                           ↓
                      POST /session/create
                      Creates session in Supabase
@@ -261,14 +259,22 @@ Per-Question Recording
         neutral    (default)
 
   On answer submission  →  POST /session/{id}/save-response
+                           Validates question_stage against known stage values
                            Uploads audio + video to Cloudinary (in-memory, no disk)
                            Naming: {login_id}_{session_id}_q{n}_{audio|video}
                            Folder: candidates/{login_id}/sessions/{session_id}/
                            Stores video_url + audio_url in question_responses
+                           Fires _bg_process_single_response (daemon thread):
+                             → Whisper transcription
+                             → semantic scoring (SentenceTransformer + VADER)
+                             → LLM judge with stage-specific evaluation criteria
+                             → 5-dimension mark_response scoring
+                             → GazeFollower on the uploaded video
 
                         →  POST /video/analyze-chunk
-                           Classifies gaze zones using calibrated thresholds
-                           Detects cheating via fixation + horizontal scan patterns
+                           Loads calibration once for both zone classification and cheating
+                           Classifies gaze zones using calibrated personalised thresholds
+                           Detects cheating via 9-signal FFT-based scan pattern analysis
                            Runs DeepFace on video frames → 8-class emotion distribution
                            Runs CHROM rPPG → avg_hrv_rmssd, hr_bpm, stress_spike_detected
                            Stores all signals in video_signals table
@@ -283,41 +289,46 @@ Interview Complete      →  Thank-you page fires POST /session/{id}/process
 ```
 _bg_post_session (daemon thread):
 
-  Step 1 — Transcription
-    For each question with audio_url:
+  Step 1 — Fetch session + build stage map
+    Load session to get question stage mapping (intro/technical/behavioral/...)
+    Fetch all question_responses rows
+
+  Step 2 — Transcription + Scoring (any un-transcribed questions)
+    For each question with audio_url and no transcript:
       Download .webm from Cloudinary  →  _download_to_tmp()
       Whisper.transcribe() (serialised via _whisper_lock)
       Update question_responses.transcript
+      LLM judge with CORRECT stage-specific criteria → verdict + key_gaps + strengths
+      mark_response → technical / communication / behavioral / engagement / authenticity
+      combined_score = (llm_score × 0.70 + semantic_score × 0.30) × 10
+      Save all scores back to question_responses
 
-  Step 2 — Scoring
-    For each transcribed question:
-      sentence-transformers cosine_similarity(transcript, ideal_answer)  → semantic_score
-      VADER SentimentIntensityAnalyzer(transcript)                        → sentiment dict
-      combined_score = (semantic_score × 0.6) + ((compound + 1) / 2 × 0.4) × 10
-      Save full ResponseScore back to question_responses
-
-  Step 3 — OCEAN Finalize
-    POST http://localhost:8000/session/{id}/finalize
-    Loads all ResponseScore objects from Supabase
-    Maps per-question scores to Big-Five trait signals:
-      Extraversion    ← intro question sentiment + engagement
-      Conscientiousness ← logical question semantic score + structure
-      Openness        ← situational question creative divergence + vocab richness
-      Agreeableness   ← behavioral question cooperative keywords + teamwork similarity
-      Neuroticism     ← HRV spikes + negative sentiment on pressure questions
-    Computes job_fit_score via cosine_similarity(all_transcripts, job_description)
-    Calls Qwen2.5 for role_recommendation (2-sentence summary)
-    Saves OCEAN report to ocean_reports table
-    success_prediction: High (job_fit > 70) / Medium (50-70) / Low (<50)
+  Step 3 — OCEAN Finalize (inline, no HTTP self-call)
+    _finalize_ocean_inline():
+      Loads all ResponseScore objects from Supabase
+      Maps per-question scores to Big-Five trait signals:
+        Extraversion    ← intro question sentiment + engagement (depth-weighted)
+        Conscientiousness ← technical/logical semantic score + structure signal
+        Openness        ← vocabulary richness across technical/logical/situational
+        Agreeableness   ← behavioral cooperative keywords + positive sentiment
+        Neuroticism     ← negative sentiment + stress signals (inverse)
+      Signals multiplied by _depth_ratio() — shallow answers get low weight
+      Computes job_fit_score via cosine_similarity(all_transcripts, JD)
+        Fallback: keyword overlap when SentenceTransformer unavailable
+      ocean_confidence: High (≥6 questions) / Medium (3-5) / Low (<3)
+      success_prediction: High (fit≥70 AND balance≥60) / Medium / Low
+      Calls Gemini Flash for role_recommendation narrative
+      Saves OCEAN report to ocean_reports table
 
   Step 4 — GazeFollower Video Analysis
     For each question with video_url:
       Download .webm from Cloudinary
       Extract frames via OpenCV (every 3rd frame)
-      GazeFollower.predict(frame) → normalised (x, y) gaze point
-      Classify zones → zone_distribution
-      _detect_robotic_reading() → reversal_rate + y_stdev → reading flag
-      detect_cheating() with neurodiversity-adjusted thresholds
+      GazeFollower.predict(frame) → raw (x, y) gaze point
+      Track off-screen predictions before clamping → offscreen_ratio_raw
+      Classify zones using calibration-derived thresholds
+      _detect_robotic_reading() with adaptive thresholds (scaled by sqrt(baseline_variance))
+      detect_cheating() with neurodiversity-adjusted personalised thresholds
       Store all metrics in video_signals.gaze_metrics (JSONB)
 ```
 
@@ -325,8 +336,11 @@ _bg_post_session (daemon thread):
 
 ```
 GET /opening/{id}/candidates  →  lists all sessions with OCEAN summaries
+                                   batch-checks question_responses (single query)
+                                   sessions with no responses → ocean_summary: null
 GET /session/{id}/report      →  full joined record:
                                    sessions + question_responses + video_signals + ocean_reports
+                                   interview_completed flag (false if no question_responses)
                                    video_url / audio_url → direct Cloudinary playback
 DELETE /session/{id}          →  destroys Cloudinary assets + all Supabase rows
 ```
@@ -337,64 +351,51 @@ DELETE /session/{id}          →  destroys Cloudinary assets + all Supabase row
 
 ### `services/parser/`
 
-**parser.py** — Wraps IBM Docling's `DocumentConverter` for PDF parsing. Falls back to regex-based extraction for plain text resumes. Outputs a `ParsedResume` Pydantic model containing name, contact, experience entries (title, company, date range, bullets), skills list, education, and raw Markdown.
+**parser.py** — Wraps IBM Docling's `DocumentConverter` for PDF parsing. Falls back to regex-based extraction for plain text resumes. Email regex supports multi-part TLDs (`.co.uk`, `.com.au`). Phone regex handles international formats with E.164, UK, India, EU patterns. Name detection skips known section headers (`experience`, `education`, `skills`, etc.). Section caps: education 10, experience 10, projects 10.
 
 ### `services/question_gen/`
 
-**generator.py** — Calls Gemini Flash (primary) or Ollama Qwen2.5 (fallback) with a structured system prompt. Generates 18-20 questions mapped directly to resume projects and job description requirements, distributed across `intro`, `technical`, `behavioral`, and `situational` stages. Every question includes an `ideal_answer` field (3-5 sentence gold-standard response) and an `answer_key` with `critical_keywords`, `ideal_sentiment`, and a 1-10 `rubric`.
+**generator.py** — Calls Gemini Flash (primary) or Ollama Qwen2.5 (fallback) with a structured system prompt. Generates 18-20 questions mapped directly to resume projects and job description requirements, distributed across `intro`, `technical`, `behavioral`, `logical`, and `situational` stages. Every question includes an `ideal_answer` field and an `answer_key`. Tracks up to 20 used topic keywords across batches to prevent repetition. Padding logic correctly tracks `added_in_batch` to handle non-dict items in LLM responses.
 
 ### `services/scoring/`
 
 **response_scorer.py** — Takes a candidate transcript and ideal answer. Computes:
-- `semantic_score` — cosine similarity via `all-MiniLM-L6-v2` SentenceTransformer (keyword overlap fallback if tf-keras unavailable)
+- `semantic_score` — cosine similarity via `all-MiniLM-L6-v2` SentenceTransformer (keyword overlap fallback if unavailable)
+- `_depth_penalty` — caps scores for shallow responses: <30 words capped at 0.30, <50 words scaled 70%, <80 words scaled 85%
 - `sentiment` — VADER `compound`, `pos`, `neg`, `neu` scores
-- `combined_score` — weighted composite normalised to 0-10
-- `engagement_flag` — True if word count < 30 or semantic_score < 0.25
+- `combined_score` — semantic (90%) + VADER compound (10%) normalised to 0–10
+- `engagement_flag` — True if word count < 50 OR penalised semantic < 0.20
+- Whisper hallucination guard: 15 known garbage phrases + mixed Unicode script detection
 
-**ocean_mapper.py** — Aggregates all `ResponseScore` objects into Big-Five trait scores (0-100) using deterministic rule mapping. Computes `job_fit_score` as cosine similarity between all concatenated transcripts and the job description. Calls Qwen2.5 for a `role_recommendation` narrative. Outputs a full `OceanReport` Pydantic model.
+**llm_marker.py** — Two entry points:
+- `judge_response()` — stage-aware verdict (correct / partially_correct / can_be_better / incorrect / not_attempted) with per-stage criteria: behavioral enforces STAR method, technical enforces depth and terminology, logical enforces step-by-step reasoning. Score mapping: correct=9.5, partially_correct=6.5, can_be_better=3.5, incorrect=1.0.
+- `mark_response()` — scores 5 dimensions (technical, communication, behavioral, engagement, authenticity 0–10 each) + raw OCEAN signals (0–1 each). Both functions try Gemini Flash first, fall back to Ollama.
+
+**ocean_mapper.py** — Aggregates all `ResponseScore` objects into Big-Five trait scores (0–100) using deterministic rule mapping. All signals are depth-weighted via `_depth_ratio()` so shallow answers don't pollute the profile. Computes `job_fit_score` as cosine similarity between all concatenated transcripts and the job description, with keyword fallback if SentenceTransformer is unavailable. `ocean_confidence` reported as High/Medium/Low based on questions scored.
 
 ### `services/video_analysis/calibration/`
 
-**calibration_runner.py** — Implements a 15-point screen calibration sequence. The browser sends averaged MediaPipe iris coordinates for each known screen position (corners, edge midpoints, center, inner quadrant points). `run_calibration()` fits a 3×2 affine transform via `numpy.linalg.lstsq`, computes per-candidate baseline gaze variance, blink rate, and a neurodiversity adjustment factor (1.4× scale on cheating thresholds if baseline variance > 0.06). Returns a `calibration_quality_score` (0-1 based on cluster tightness) — below 0.6 triggers a recalibration prompt.
+**calibration_runner.py** — Implements a 15-point screen calibration sequence. The browser sends averaged MediaPipe iris coordinates for each known screen position (corners, edge midpoints, center, inner quadrant points). `run_calibration()` fits a 3×2 affine transform via `numpy.linalg.lstsq`, computes per-candidate baseline gaze variance, blink rate, and a neurodiversity adjustment factor (1.4× scale on cheating thresholds if baseline variance > 0.06). Returns a `calibration_quality_score` (0–1 based on cluster tightness) — below 0.6 triggers a recalibration prompt.
 
 ### `services/video_analysis/gaze/`
 
-**zone_classifier.py** — Loads the candidate's personal calibration JSON. Classifies each gaze point into:
-- `strategic` — calibrated y <= 0.55, x within ±30% of center
+**zone_classifier.py** — Loads the candidate's personal calibration JSON. Applies affine transform before every classification. Classifies each gaze point into:
+- `strategic` — calibrated y ≤ 0.55, x within ±30% of center
 - `wandering` — frame-to-frame displacement > 1.3× candidate baseline
-- `red` — calibrated y > 0.72 (notes/phone)
+- `red` — calibrated y > 0.72 (notes/phone) or off-screen angle > 15°
 - `neutral` — all other positions
 
-**cheating_detector.py** — Applies the affine transform before all classification. Detects horizontal scanning via direction-reversal rate with threshold `baseline_variance × 0.4`. Reports `risk_level` (low / medium / high) with confidence scores and timestamps.
+**cheating_detector.py** — 9-signal batch detector: horizontal scan (x-variance), rapid gaze jumps, periodic scan via FFT (0.3–3.5 Hz reading band), directional sweeps (L→R reversal rate), gaze freeze (variance < 5% of baseline), extreme lateral gaze, robotic velocity, linear reading trajectory, sustained downward gaze. Risk level scaled by `neurodiversity_adjustment` — high-variance candidates are not unfairly penalised. Max score = 13 (weighted); high ≥ 5, medium ≥ 2.
 
-**gazefollower_runner.py** — Post-session video processor. Extracts frames with OpenCV, runs GazeFollower's appearance-based model (no per-user calibration needed at inference), aggregates zone distribution, runs `_detect_robotic_reading()` (reversal rate + Y-axis standard deviation), and re-runs cheating detection. Returns a structured `gaze_metrics` dict stored as JSONB.
+**gazefollower_runner.py** — Post-session video processor. Extracts frames with OpenCV (every 3rd frame), runs GazeFollower's appearance-based model, tracks off-screen predictions before coordinate clamping (`offscreen_ratio_raw`), classifies zones using calibration-derived thresholds, runs adaptive `_detect_robotic_reading()` (thresholds scaled by `sqrt(baseline_variance)`), and re-runs cheating detection with personalised baseline.
 
 ### `services/video_analysis/emotion_analyzer.py`
 
-Runs DeepFace on sampled video frames. Returns 8-class emotion distribution (`happy`, `sad`, `angry`, `fear`, `disgust`, `surprise`, `neutral`, `contempt`) as proportional floats summing to 1.0.
+Runs DeepFace with `enforce_detection=True` — frames without a detectable face are skipped rather than analysing background content. Returns 8-class emotion distribution as proportional floats summing to 1.0. Logs skipped frame count.
 
 ### `services/video_analysis/rppg.py`
 
-Implements CHROM rPPG using OpenCV to extract the forehead region of interest. Computes a photoplethysmography signal from the G channel, applies bandpass filtering, and derives `avg_hrv_rmssd`, `hr_bpm`, and a `stress_spike_detected` boolean.
-
-### `services/database/cloudinary_client.py`
-
-- `upload_bytes()` — uploads raw bytes to Cloudinary with `resource_type="video"` (handles both WebM video and WebM audio). Deterministic `public_id` prevents duplicate uploads.
-- `build_public_id()` — produces `{login_id}_{session_id}_q{n}_{kind}` naming convention.
-- `build_session_folder()` — produces `candidates/{login_id}/sessions/{session_id}`.
-- `destroy()` — single-asset deletion.
-- `delete_by_prefix()` — bulk deletion for session cleanup and database reset.
-
-### `services/database/supabase_client.py`
-
-All Supabase operations via `supabase-py`. Key functions:
-- `create_session()` / `get_session()` — session lifecycle management
-- `create_candidate_credentials()` — one-time hashed password storage
-- `save_question_response()` — upsert on `(session_id, question_id)` — safe for both initial placeholder and post-processing updates
-- `save_video_signals()` / `update_video_gaze_metrics()` — split storage for real-time vs post-session gaze data
-- `save_ocean_scores()` — upsert on `session_id`
-- `delete_session()` — cascades Cloudinary delete then FK-ordered Supabase delete
-- `truncate_all_tables()` — admin reset, returns row counts per table
+Implements CHROM rPPG using OpenCV to extract the forehead region of interest. Computes a photoplethysmography signal, applies bandpass filtering (0.75–3 Hz), and derives `avg_hrv_rmssd`, `hr_bpm`, and `stress_spike_detected`. Returns `data_available: false` (not fake defaults) when signal quality is too low.
 
 ---
 
@@ -420,13 +421,11 @@ All Supabase operations via `supabase-py`. Key functions:
 |--------|------|-------------|
 | POST | `/session/create` | Create session + one-time candidate credentials |
 | POST | `/candidate/login` | Validate credentials → return session_id + questions |
-| POST | `/session/{id}/save-response` | Upload audio + video to Cloudinary |
-| POST | `/session/{id}/process` | Fire background pipeline (202 immediate return) |
-| POST | `/session/{id}/transcribe` | Download audio → Whisper → update transcripts |
-| POST | `/session/{id}/process-video` | Download video → GazeFollower metrics |
+| POST | `/session/{id}/save-response` | Upload audio + video to Cloudinary, fires background processing |
+| POST | `/session/{id}/process` | Fire full background pipeline (202 immediate return) |
 | POST | `/session/{id}/finalize` | Aggregate responses → OCEAN scores → Supabase |
 | GET  | `/session/{id}/status` | Live pipeline stage for polling |
-| GET  | `/session/{id}/report` | Full joined candidate report |
+| GET  | `/session/{id}/report` | Full joined candidate report (includes `interview_completed` flag) |
 | DELETE | `/session/{id}` | Delete candidate: Cloudinary assets + all Supabase rows |
 
 ### Video
@@ -454,7 +453,14 @@ All Supabase operations via `supabase-py`. Key functions:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| DELETE | `/admin/reset-database` | Wipe Cloudinary prefix + truncate all tables |
+| DELETE | `/admin/reset-database` | Wipe Cloudinary prefix + truncate all tables (requires `X-Admin-Secret` header) |
+
+### Health
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Global API health check |
+| GET | `/session/{id}/health` | Per-session heartbeat |
 
 All error responses follow the structure:
 ```json
@@ -495,16 +501,20 @@ All error responses follow the structure:
 | question_id | TEXT | |
 | question_text | TEXT | |
 | ideal_answer | TEXT | |
-| transcript | TEXT | Filled by Whisper post-session |
-| transcript_flagged | BOOLEAN | |
-| semantic_score | FLOAT | all-MiniLM-L6-v2 cosine similarity |
+| transcript | TEXT | Filled by Whisper background processing |
+| transcript_flagged | BOOLEAN | True if Whisper hallucination detected |
+| semantic_score | FLOAT | SentenceTransformer cosine similarity |
 | sentiment | JSONB | `{compound, pos, neg, neu}` |
-| combined_score | FLOAT | 0-10 weighted composite |
-| technical_score | FLOAT | |
-| communication_score | FLOAT | |
-| behavioral_score | FLOAT | |
-| engagement_score | FLOAT | |
-| authenticity_score | FLOAT | |
+| combined_score | FLOAT | 0–10 weighted composite (LLM 70% + semantic 30%) |
+| technical_score | FLOAT | LLM dimension score 0–10 |
+| communication_score | FLOAT | LLM dimension score 0–10 |
+| behavioral_score | FLOAT | LLM dimension score 0–10 |
+| engagement_score | FLOAT | LLM dimension score 0–10 |
+| authenticity_score | FLOAT | LLM dimension score 0–10 |
+| llm_verdict | TEXT | correct / partially_correct / can_be_better / incorrect / not_attempted |
+| llm_verdict_reason | TEXT | One-sentence LLM explanation |
+| llm_key_gaps | JSONB | Array of specific missing points |
+| llm_strengths | JSONB | Array of specific strong points |
 | video_file_id | TEXT | Cloudinary public_id |
 | audio_file_id | TEXT | Cloudinary public_id |
 | video_url | TEXT | Cloudinary secure_url |
@@ -518,23 +528,23 @@ All error responses follow the structure:
 | session_id | TEXT FK | |
 | question_id | TEXT | |
 | gaze_zone_distribution | JSONB | Real-time zones from browser MediaPipe |
-| cheat_flags | JSONB | risk_level, confidence, timestamps |
+| cheat_flags | JSONB | risk_level, 9-signal breakdown, cheat_score |
 | emotion_distribution | JSONB | 8-class DeepFace percentages |
-| avg_hrv_rmssd | FLOAT | rPPG-derived |
-| hr_bpm | FLOAT | rPPG-derived |
+| avg_hrv_rmssd | FLOAT | rPPG-derived (null if signal unavailable) |
+| hr_bpm | FLOAT | rPPG-derived (null if signal unavailable) |
 | stress_spike_detected | BOOLEAN | |
-| gaze_metrics | JSONB | GazeFollower post-session metrics |
+| gaze_metrics | JSONB | GazeFollower post-session metrics + offscreen_ratio_raw |
 
 ### `ocean_reports`
 | Column | Type | Notes |
 |--------|------|-------|
 | session_id | TEXT PK | |
-| openness | FLOAT | 0-100 |
+| openness | FLOAT | 0–100 |
 | conscientiousness | FLOAT | |
 | extraversion | FLOAT | |
 | agreeableness | FLOAT | |
 | neuroticism | FLOAT | |
-| job_fit_score | FLOAT | 0-100 |
+| job_fit_score | FLOAT | 0–100 |
 | success_prediction | TEXT | High / Medium / Low |
 | role_recommendation | TEXT | 2-sentence LLM narrative |
 
@@ -543,7 +553,7 @@ All error responses follow the structure:
 |--------|------|-------|
 | id | BIGSERIAL PK | |
 | session_id | TEXT | Nullable |
-| service | TEXT | e.g. AudioUpload, Transcribe, PostSessionGaze |
+| service | TEXT | e.g. AudioUpload, EarlyTranscribe, PostSessionGaze |
 | error_message | TEXT | |
 | created_at | TIMESTAMPTZ | |
 
@@ -559,7 +569,7 @@ All error responses follow the structure:
 
 **`calibration/page.tsx`** — Full-screen dark overlay with a 15-point glowing dot sequence. Loads MediaPipe FaceMesh from CDN. Captures 30 iris landmark frames per dot at 66ms intervals. Filters noisy frames (face must be centred, stable). POSTs to `/calibration/start` then `/calibration/submit`. Shows quality score — recalibration prompt if below 0.6.
 
-**`interview/page.tsx`** — Distraction-free fullscreen interview. Shows one question at a time with a circular countdown timer (amber at 30s, red at 10s). Records audio and video simultaneously via MediaRecorder. Collects MediaPipe gaze samples during each question. On answer: POSTs to `/session/{id}/save-response` (media upload) and `/video/analyze-chunk` (gaze + emotion + rPPG). 5-second interstitial between questions.
+**`interview/page.tsx`** — Distraction-free fullscreen interview. Shows one question at a time with a circular countdown timer (amber at 30s, red at 10s). Records audio and video simultaneously via MediaRecorder. Collects MediaPipe gaze samples during each question. On answer: POSTs to `/session/{id}/save-response` (media upload, fires per-question background processing) and `/video/analyze-chunk` (gaze + emotion + rPPG). 5-second interstitial between questions.
 
 **`thank-you/page.tsx`** — Shows session reference ID. Fires `POST /session/{id}/process` once (guarded by `useRef` to prevent React StrictMode double-fire). Polls `/session/{id}/status` every 8 seconds until the backend pipeline completes. Never shows scoring data to the candidate.
 
@@ -574,10 +584,10 @@ All error responses follow the structure:
 - **Delete** — calls `DELETE /session/{id}` with confirmation; removes all media and scores without touching the job opening
 
 **`candidates/[id]/page.tsx`** — Digital Candidate Twin profile with four tabs:
-- **Overview** — OCEAN Big Five radar chart, sentiment timeline, emotion distribution, HRV area chart, job-fit score ring
-- **Per-Question** — expandable accordion per question: transcript, scores as progress bars, gaze zone donut chart, emotion snapshots, cheat flag banners, native `<video>` and `<audio>` players using Cloudinary secure URLs
+- **Overview** — OCEAN Big Five radar chart, sentiment timeline, emotion distribution, HRV area chart, job-fit score ring. Shows `"—"` and "Interview not taken" when `interview_completed` is false — never shows fake scores.
+- **Per-Question** — expandable accordion per question: transcript, LLM verdict badge, scores as progress bars, gaze zone donut chart, emotion snapshots, cheat flag banners, native `<video>` and `<audio>` players using Cloudinary secure URLs
 - **Gaze & Signals** — GazeFollower zone distribution bar chart, HRV+HR area chart, robotic reading detection, per-question cheat risk breakdown
-- **Raw Media** — full-session video and audio players
+- **Raw Media** — full-session video and audio players. Shows "Candidate has not taken the interview yet" message when no media is available.
 
 ---
 
@@ -598,7 +608,7 @@ Both audio (WebM) and video (WebM) are stored under `resource_type="video"` as C
 **Media lifecycle:**
 - Uploaded immediately at end of each question response (in-memory, no disk write)
 - Uploaded with `overwrite=True` — re-running the interview re-uploads cleanly
-- Deleted atomically when `DELETE /session/{id}` is called
+- Deleted atomically when `DELETE /session/{id}` is called (folder prefix + individual IDs)
 - Deleted by prefix `candidates/` when admin reset is triggered
 
 ---
@@ -611,14 +621,13 @@ Copy `.env` and set all values:
 # LLM — Gemini Flash (primary) / Ollama Qwen (fallback)
 GEMINI_API_KEY=
 
-# Ollama configuration
+# Ollama configuration (used as fallback only)
 OLLAMA_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5:0.5b
 
 # Supabase
 SUPABASE_URL=
 SUPABASE_KEY=
-SUPABASE_CONNECTION_STRING=
 
 # Cloudinary
 CLOUDINARY_CLOUD_NAME=
@@ -628,7 +637,11 @@ CLOUDINARY_API_SECRET=
 # Frontend
 NEXT_PUBLIC_API_URL=http://localhost:8000
 
-# Admin reset endpoint secret
+# CORS — comma-separated list of allowed frontend origins
+# For production: CORS_ORIGINS=https://your-app.vercel.app
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Admin reset endpoint secret — CHANGE before any shared deployment
 ADMIN_SECRET=change-before-deploying
 ```
 
@@ -643,16 +656,19 @@ ADMIN_SECRET=change-before-deploying
 - Ollama installed and running (`ollama serve`)
 - Supabase project with schema applied
 - Cloudinary account
+- Google Gemini API key (free tier sufficient)
 
 ### 1. Database Migration
 
-In Supabase SQL Editor, run the full contents of `supabase_migration.sql`. The script is idempotent — safe to run on an existing database. It adds all missing columns, creates indexes, and configures FK-safe delete order.
+In Supabase SQL Editor, run the full contents of `supabase_schema.sql`. The script is idempotent — safe to run on an existing database. It adds all missing columns, creates indexes, and configures FK-safe delete order.
 
 ### 2. Pull Local LLM Model
 
 ```bash
 ollama pull qwen2.5:0.5b
 ```
+
+This is only used as a fallback. If `GEMINI_API_KEY` is set, Ollama is never called for question generation or evaluation.
 
 ### 3. Backend
 
@@ -662,11 +678,11 @@ python -m venv venv
 source venv/Scripts/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# GazeFollower (optional, enables post-session video gaze analysis)
+# GazeFollower (optional — enables post-session video gaze analysis)
 pip install gazefollower
 
 # Start API server
-uvicorn api.main:app --reload --port 8000
+pip install gazefollower
 ```
 
 Swagger UI available at `http://localhost:8000/docs`.
@@ -681,22 +697,176 @@ npm run dev
 
 Application available at `http://localhost:3000`.
 
-### 5. Run Tests
+### 5. Clean Database (Development Reset)
+
+Wipes all Cloudinary media under the `candidates/` prefix and truncates every Supabase table.
 
 ```bash
-cd e:/ai-intern
-python -m pytest tests/ -v
+curl -X DELETE http://localhost:8000/admin/reset-database \
+  -H "X-Admin-Secret: your-admin-secret"
+```
+
+PowerShell equivalent:
+
+```powershell
+Invoke-RestMethod -Method DELETE http://localhost:8000/admin/reset-database `
+  -Headers @{ "X-Admin-Secret" = "your-admin-secret" }
 ```
 
 ---
 
-## 13. Known Issues and Fixes
+## 13. Production Deployment
+
+Examiney.AI uses several local ML models (Whisper, SentenceTransformer, DeepFace, GazeFollower) and a local LLM (Ollama). Running these in production requires deliberate architectural decisions. This section covers every concern.
+
+### 13.1 Local Models in Production
+
+| Model | Size | Startup Time | Production Strategy |
+|-------|------|-------------|---------------------|
+| Whisper (small) | ~480 MB | ~5 s first call | Keep single process; or replace with OpenAI Whisper API |
+| SentenceTransformer (all-MiniLM-L6-v2) | ~90 MB | ~3 s first call | Cached via `lru_cache(maxsize=1)` — safe in single process |
+| DeepFace | ~600 MB+ | ~10 s first call | Acceptable for background processing; disable if latency critical |
+| GazeFollower | ~200 MB | ~5 s first call | Post-session only — no latency impact on interview itself |
+| Ollama Qwen2.5:0.5b | ~400 MB | Depends on host | Used only when Gemini is unavailable; can be disabled in pure-cloud setup |
+
+### 13.2 Critical: Single Worker Requirement
+
+The API runs with `--workers 1`. **Do not increase workers** without architectural changes:
+
+- `_whisper_lock` is a process-local threading lock. With multiple workers (processes), two requests can reach Whisper simultaneously — each worker loads its own ~480 MB model instance, consuming ~1 GB RAM and potentially corrupting model state.
+- `_get_whisper()` and `_get_model()` use `lru_cache(maxsize=1)` which is also process-local.
+
+**To scale horizontally in production:**
+
+```
+Option A — Task Queue (recommended)
+  Move transcription + scoring into Celery/ARQ workers.
+  Each worker is a dedicated process holding exactly one Whisper instance.
+  FastAPI just enqueues jobs and polls.
+
+Option B — Dedicated Transcription Microservice
+  Extract transcription into a separate FastAPI service (1 instance).
+  Main API forwards audio URLs to it via internal HTTP.
+  Scale main API freely (workers=N) since transcription is now isolated.
+
+Option C — Replace Whisper with OpenAI Whisper API
+  Remove the local model entirely.
+  WHISPER_API_KEY= in .env, call api.openai.com/v1/audio/transcriptions.
+  Then --workers 4+ is safe.
+```
+
+### 13.3 Using Docker Compose
+
+The provided `docker-compose.yml` runs the API and Ollama together:
+
+```bash
+# Build and start
+docker-compose up --build -d
+
+# View logs
+docker-compose logs -f api
+
+# Pull Qwen model into the Ollama container
+docker-compose exec ollama ollama pull qwen2.5:0.5b
+```
+
+The `outputs/` directory is volume-mounted to persist calibration JSONs across container restarts.
+
+### 13.4 Environment Variables for Production
+
+Set these in your deployment platform (Railway, Render, Fly.io, etc.) or update `.env`:
+
+```dotenv
+# Production LLM — use Gemini exclusively; disable Ollama
+GEMINI_API_KEY=your-real-key
+
+# Set to empty string to disable Ollama fallback (faster fail, no 60s timeout)
+OLLAMA_URL=
+
+# CORS — your actual frontend domain
+CORS_ORIGINS=https://your-app.vercel.app
+
+# Strong admin secret (generate with: openssl rand -hex 32)
+ADMIN_SECRET=your-random-64-char-hex-string
+
+# Frontend
+NEXT_PUBLIC_API_URL=https://your-api.railway.app
+```
+
+### 13.5 Frontend Deployment (Vercel)
+
+```bash
+cd frontend
+# Add to Vercel environment variables:
+# NEXT_PUBLIC_API_URL = https://your-api.railway.app
+vercel deploy --prod
+```
+
+No local models run in the frontend. All compute is in the API.
+
+### 13.6 Calibration File Persistence
+
+Calibration JSONs are saved to `outputs/calibration/{session_id}_calibration.json` and immediately uploaded to Cloudinary as `raw` resources. In production:
+
+- The local file is deleted after upload (`os.unlink(cal_path)` in `calibration_submit`)
+- The cheating detector loads calibration from disk via `load_calibration(session_id)` — this will fail if the file was deleted
+- **Fix for serverless/ephemeral storage**: Download calibration from Cloudinary before use, or store calibration data directly in the `sessions` Supabase table
+
+For containerised deployments with a persistent volume (the default Docker Compose setup), this is not an issue.
+
+### 13.7 Recommended Production Stack
+
+```
+Frontend:   Vercel (Next.js 14) — free tier sufficient for most interview volumes
+API:        Railway / Render (Python 3.11, --workers 1, 2 GB RAM minimum)
+Whisper:    Co-deployed with API or replaced with OpenAI Whisper API
+Ollama:     Disabled in production (GEMINI_API_KEY covers all LLM needs)
+Database:   Supabase (already cloud-hosted)
+Media:      Cloudinary (already cloud-hosted)
+```
+
+---
+
+## 14. Security Considerations
+
+### Authentication Gaps (Current Limitations)
+
+| Gap | Risk | Recommended Fix |
+|-----|------|-----------------|
+| No recruiter authentication on API endpoints | Anyone with the API URL can list all sessions, view reports, and delete candidates | Add JWT auth middleware (FastAPI-Users or custom) to all `/session`, `/opening`, `/sessions` endpoints |
+| `/admin/reset-database` protected by a single shared secret | If the secret leaks, all data can be wiped | Rotate `ADMIN_SECRET` regularly; restrict to IP allowlist in production |
+| No rate limiting on `/candidate/login` | Brute force of candidate passwords is possible | Add slowapi rate limiting: 5 requests/minute per IP |
+| `question_stage` is client-supplied | Candidate could submit a different stage to manipulate scoring strictness | Validated against `_KNOWN_STAGES` set on server — this is already enforced |
+
+### CORS
+
+CORS origins are configurable via `CORS_ORIGINS` env var. Default allows only `localhost:3000`. **Set this to your exact frontend domain** in production — never use `*` with `allow_credentials=True`.
+
+### Input Handling
+
+- All Supabase queries use the official `supabase-py` client with parameterized operations — SQL injection is not possible
+- Transcript and question text from candidates are stored as plain text and rendered escaped in the frontend
+- `ideal_answer` and `question_text` truncated at 600/400 chars respectively in LLM prompts to prevent prompt injection
+
+### Secrets
+
+- Candidate passwords are bcrypt-hashed before storage
+- Raw passwords are never logged or stored — only returned once to the recruiter at creation time
+- `ADMIN_SECRET` must be set via environment variable — the server refuses to execute reset if the variable is empty
+
+### One-Time Credentials
+
+The `candidate_credentials.used` flag is set to `True` on first successful login. A credential cannot be used twice — if a candidate disconnects, the recruiter must create a new session.
+
+---
+
+## 15. Known Issues and Fixes
 
 ### Whisper concurrent access crash
 
 **Symptom:** `RuntimeError: Linear(in_features=768, bias=True)` when two sessions process simultaneously.
 
-**Fix:** Whisper model access is serialised via `_whisper_lock = threading.Lock()`. All transcription calls acquire this lock before invoking the model.
+**Fix:** Whisper model access is serialised via `_whisper_lock = threading.Lock()`. All transcription calls acquire this lock before invoking the model. Do not run with `--workers > 1`.
 
 ### GazeFollower / MediaPipe version conflict
 
@@ -722,7 +892,7 @@ pip install tf-keras
 
 **Symptom:** `AttributeError: module 'bcrypt' has no attribute '__about__'` when using passlib.
 
-**Fix:** The backend uses bcrypt directly, bypassing passlib. If encountered with older code:
+**Fix:** The backend uses bcrypt directly, bypassing passlib.
 
 ```bash
 pip install bcrypt==4.0.1
@@ -736,7 +906,23 @@ pip install bcrypt==4.0.1
 
 ### GazeFollower not installed
 
-When `gazefollower` is not installed, the pipeline gracefully stores `{"provider": "gazefollower", "status": "not_installed"}` in `video_signals.gaze_metrics`. The dashboard displays this status rather than crashing. Install with `pip install gazefollower` to enable full post-session gaze analysis.
+When `gazefollower` is not installed, the pipeline gracefully stores `{"provider": "gazefollower", "status": "not_installed"}` in `video_signals.gaze_metrics`. Install with `pip install gazefollower` to enable full post-session gaze analysis.
+
+### Candidate shown fake 50% job fit before interview
+
+**Fix:** The API checks `question_responses` before returning any OCEAN data. Sessions with no responses have `interview_completed: false` and `ocean_report: null`. Stale `ocean_reports` rows are deleted on detection. The frontend shows `"—"` and "Interview not taken" for all scores when `interview_completed` is false.
+
+### LLM judge using generic evaluation criteria for all questions
+
+**Fix:** Both `_bg_process_single_response` and `_bg_post_session` now pass the actual question stage (`intro`, `technical`, `behavioral`, `logical`, `situational`) to `judge_response`. Stage-specific criteria are enforced: behavioral requires STAR method examples, technical requires depth and correct terminology, logical requires step-by-step reasoning.
+
+### Dimension scores (technical/communication/behavioral) always 0
+
+**Fix:** `mark_response()` is now called in both scoring code paths and its results are persisted to `question_responses`.
+
+### Background pipeline calling itself via HTTP (`localhost:8000`)
+
+**Fix:** `_finalize_ocean_inline()` replaces the `httpx.POST http://localhost:8000/finalize` self-call. OCEAN finalization runs inline in the background thread — no hardcoded port, no network round-trip, no silent failure if the port changes.
 
 ---
 
@@ -753,3 +939,7 @@ When `POST /session/{id}/process` is called and the frontend polls `/session/{id
 | complete (OCEAN saved) | `status: ready` | 100% |
 
 The pipeline runs in a daemon thread and is fire-and-forget. If the server restarts mid-pipeline, call `POST /session/{id}/process` again to re-run from scratch (all operations are idempotent via upsert).
+
+
+
+

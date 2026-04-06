@@ -5,7 +5,7 @@ time, captures 30 frames of iris landmark data per dot via MediaPipe FaceMesh
 (landmarks 468 and 473) in the browser, and sends averaged iris coordinates to
 this module.  We then fit a personal affine transform (numpy.linalg.lstsq) that
 maps raw iris coords → actual screen coords, compute per-candidate baseline
-stats, and persist everything to outputs/calibration/{session_id}_calibration.json.
+stats, and persist the result to Supabase (sessions.calibration_data).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ NEURODIVERSITY_VARIANCE_THRESHOLD = 0.06
 NEURODIVERSITY_SCALE = 1.4
 CAPTURE_FPS = 15.0               # frontend polls ~60–80ms; treat as ~15 fps
 
-# outputs/calibration/ lives at the repo root
+# Local fallback directory — used only when Supabase is unreachable (dev mode)
 OUTPUTS_DIR = Path(__file__).resolve().parents[3] / "outputs" / "calibration"
 
 
@@ -156,7 +156,10 @@ def _baseline_blink_rate(measurements: List[PointMeasurement]) -> float:
     return round(blink_count / (seconds / 60.0), 2)
 
 
-def _persist(result: CalibrationResult) -> None:
+def _persist_local(result: CalibrationResult) -> None:
+    """Write calibration to local disk as a last-resort fallback only.
+    Primary storage is Supabase — this file is never the source of truth.
+    """
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     path = OUTPUTS_DIR / f"{result.session_id}_calibration.json"
     with path.open("w") as f:
@@ -185,8 +188,7 @@ def run_calibration(
 
     Returns
     -------
-    CalibrationResult written to
-        outputs/calibration/{session_id}_calibration.json
+    CalibrationResult — caller is responsible for persisting (e.g. save_calibration_data).
     """
     if not measurements:
         raise ValueError("No calibration measurements provided.")
@@ -212,12 +214,27 @@ def run_calibration(
         calibration_points=[[sx, sy] for sx, sy in CALIBRATION_POINTS],
     )
 
-    _persist(result)
     return result
 
 
 def load_calibration(session_id: str) -> dict:
-    """Load a previously saved calibration JSON for *session_id*."""
+    """Load calibration data for *session_id*.
+
+    Primary source: Supabase (sessions.calibration_data).
+    Fallback: local file at outputs/calibration/{session_id}_calibration.json
+              (used in local dev before Supabase is available).
+    Raises FileNotFoundError when neither source has data.
+    """
+    # Primary: Supabase — works across restarts, containers, and multiple processes
+    try:
+        from services.database.supabase_client import get_calibration_data
+        return get_calibration_data(session_id)
+    except FileNotFoundError:
+        pass   # not in DB yet — try local fallback
+    except Exception:
+        pass   # Supabase unavailable — try local fallback
+
+    # Fallback: local file (dev / offline mode)
     path = OUTPUTS_DIR / f"{session_id}_calibration.json"
     if not path.exists():
         raise FileNotFoundError(f"No calibration found for session '{session_id}'.")

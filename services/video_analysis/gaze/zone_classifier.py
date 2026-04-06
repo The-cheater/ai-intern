@@ -72,7 +72,7 @@ class ZoneClassifier:
         prev_raw_iris: Optional[Tuple[float, float]] = None,
     ) -> GazeZone:
         """
-        Classify the current gaze zone.
+        Classify the current gaze zone with neurodiversity fairness.
 
         Parameters
         ----------
@@ -85,12 +85,14 @@ class ZoneClassifier:
         if sy > self.red_y_threshold or self._is_offscreen(sx, sy):
             return GazeZone.RED
 
-        # 2. Wandering zone: excessive frame-to-frame displacement vs baseline
+        # 2. Wandering zone: excessive frame-to-frame displacement vs neurodiversity-adjusted baseline
         if prev_raw_iris is not None:
             dx = raw_iris[0] - prev_raw_iris[0]
             dy = raw_iris[1] - prev_raw_iris[1]
             displacement = math.sqrt(dx * dx + dy * dy)
-            if displacement > self.wandering_threshold:
+            # Apply neurodiversity adjustment for fairness (CRITICAL FIX #2)
+            adjusted_threshold = self.wandering_threshold * self.neurodiversity_adjustment
+            if displacement > adjusted_threshold:
                 return GazeZone.WANDERING
 
         # 3. Strategic zone: upper region, centre band

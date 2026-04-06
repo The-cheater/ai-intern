@@ -32,16 +32,29 @@
 
 @layer components {
   .glass-card {
-    background-color: hsl(var(--card) / 0.8);
-    @apply backdrop-blur-md border shadow-violet;
-    border-color: hsl(var(--border) / 0.6);
+    background-color: hsl(var(--card) / 0.9);
+    @apply backdrop-blur-md border;
+    border-color: hsl(var(--border));
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.04);
   }
 
   .glass-card-active {
-    @apply glass-card shadow-violet-active;
-    border-color: hsl(var(--primary) / 0.25);
+    @apply glass-card;
+    border-color: hsl(var(--primary) / 0.3);
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.08), 0 1px 3px 0 rgb(0 0 0 / 0.06);
   }
 }
+
+/* ── Light-theme: make dark-mode border-white/* classes visible ── */
+/* These are used throughout components designed for dark backgrounds */
+.border-white\/5  { border-color: hsl(var(--border) / 0.5) !important; }
+.border-white\/10 { border-color: hsl(var(--border)) !important; }
+.border-white\/15 { border-color: hsl(var(--border)) !important; }
+.border-white\/20 { border-color: hsl(var(--border) / 1.2) !important; }
+
+/* bg-slate-900/50 (white/50) text children should use foreground colors */
+.bg-slate-900\/50 { background-color: hsl(var(--card) / 0.6) !important; }
+.bg-slate-900\/40 { background-color: hsl(var(--card) / 0.5) !important; }
 
 .font-heading {
   font-family: var(--font-cal), system-ui, sans-serif;

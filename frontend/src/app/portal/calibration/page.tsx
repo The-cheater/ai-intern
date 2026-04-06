@@ -52,7 +52,7 @@ export default function CalibrationPage() {
 
     // ── Step 1: fetch session + calibration points ─────────────────────────────
     useEffect(() => {
-        const raw = sessionStorage.getItem("neurosync_session");
+        const raw = sessionStorage.getItem("examiney_session");
         const sid: string | null = raw ? (JSON.parse(raw) as { session_id: string }).session_id : null;
         if (sid) setSessionId(sid);
         console.log("[Calibration] Fetching calibration points, session=", sid);
@@ -62,14 +62,20 @@ export default function CalibrationPage() {
         })
             .then(r => r.json())
             .then(data => {
-                if (!sid) setSessionId(data.session_id);
+                if (!sid) {
+                    // Backend assigned a new session — persist it so page reloads don't lose it
+                    setSessionId(data.session_id);
+                    const existing = sessionStorage.getItem("examiney_session");
+                    const parsed   = existing ? JSON.parse(existing) : {};
+                    sessionStorage.setItem("examiney_session", JSON.stringify({ ...parsed, session_id: data.session_id }));
+                }
                 setCalibPoints((data.calibration_points as [number, number][]).map(([x, y]) => ({ x, y })));
                 console.log("[Calibration] Got", data.calibration_points.length, "calibration points");
                 setPhase("camera_request");
             })
             .catch((err) => {
                 console.error("[Calibration] Failed to fetch calibration points:", err);
-                setErrorMsg("Failed to connect to the API. Is the backend running?");
+                setErrorMsg("Unable to connect. Please check your internet connection and try again.");
             });
     }, []);
 
@@ -213,7 +219,7 @@ export default function CalibrationPage() {
             .then(r => r.json())
             .then(data => {
                 console.log("[Calibration] Submit result:", data);
-                sessionStorage.setItem("neurosync_calibration", JSON.stringify({
+                sessionStorage.setItem("examiney_calibration", JSON.stringify({
                     quality_score: data.calibration_quality_score,
                     needs_recalibration: data.needs_recalibration,
                     measurements: measurementsRef.current,  // save for GazeFollower mapping
@@ -225,7 +231,7 @@ export default function CalibrationPage() {
             .catch((err) => {
                 console.error("[Calibration] Submit failed:", err);
                 // Continue anyway — calibration is optional for the interview
-                sessionStorage.setItem("neurosync_calibration", JSON.stringify({ quality_score: 0, skipped: true, measurements: measurementsRef.current }));
+                sessionStorage.setItem("examiney_calibration", JSON.stringify({ quality_score: 0, skipped: true, measurements: measurementsRef.current }));
                 setNeedsRecalibration(false);
                 setPhase("result");
             });
@@ -267,54 +273,51 @@ export default function CalibrationPage() {
                 <AnimatePresence mode="wait">
                     {errorMsg && (
                         <motion.div key="error" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-                            className="z-50 max-w-md text-center px-10 py-12 bg-zinc-900 border border-red-500/30 rounded-[2rem] shadow-2xl">
-                            <AlertTriangle className="mx-auto mb-6 text-red-400" size={48} strokeWidth={1.5} />
-                            <p className="text-white/70 text-lg">{errorMsg}</p>
+                            className="z-50 max-w-sm text-center px-8 py-10 bg-zinc-900 border border-red-500/20 rounded-2xl">
+                            <AlertTriangle className="mx-auto mb-4 text-red-400" size={32} strokeWidth={1.5} />
+                            <p className="text-white/70 text-sm leading-relaxed">{errorMsg}</p>
                         </motion.div>
                     )}
                     {!errorMsg && phase === "loading" && (
                         <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center">
-                            <div className="w-16 h-16 border-2 border-indigo-500/40 border-t-indigo-400 rounded-full animate-spin mx-auto mb-6" />
-                            <p className="text-white/40 text-sm uppercase tracking-widest">Initialising…</p>
+                            <div className="w-10 h-10 border-2 border-white/20 border-t-white/60 rounded-full animate-spin mx-auto mb-4" />
+                            <p className="text-white/30 text-sm">Loading…</p>
                         </motion.div>
                     )}
                     {!errorMsg && phase === "camera_request" && (
-                        <motion.div key="camera" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-                            className="z-10 flex flex-col items-center text-center max-w-lg px-8">
-                            <div className="w-24 h-24 rounded-[2rem] bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center mb-8">
-                                <Camera size={40} className="text-indigo-400" strokeWidth={1.5} />
+                        <motion.div key="camera" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
+                            className="z-10 flex flex-col items-center text-center max-w-md px-8">
+                            <div className="w-16 h-16 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center mb-6">
+                                <Camera size={28} className="text-white/60" strokeWidth={1.5} />
                             </div>
-                            <h2 className="text-white text-4xl font-black italic tracking-tighter mb-4">Gaze Calibration</h2>
-                            <p className="text-white/50 text-lg leading-relaxed mb-3">
-                                A dot will appear at{" "}
-                                <span className="text-white font-semibold">{calibPoints.length} positions</span>.
-                                Look directly at each dot and hold still.
+                            <h2 className="text-white text-2xl font-semibold mb-3">Eye Tracking Setup</h2>
+                            <p className="text-white/50 text-sm leading-relaxed mb-2">
+                                A dot will appear at <span className="text-white font-medium">{calibPoints.length} positions</span> on screen.
+                                Look directly at each one and stay still.
                             </p>
-                            <p className="text-white/30 text-sm mb-10">Takes about 60 seconds. Sit upright, face the camera directly. <br/>The black background improves tracking accuracy.</p>
+                            <p className="text-white/30 text-xs mb-8 leading-relaxed">Takes about 60 seconds. Sit upright and face the camera.</p>
                             <button onClick={startCamera}
-                                className="bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-black text-sm uppercase tracking-[0.15em] px-10 py-5 rounded-2xl flex items-center gap-3 transition-all shadow-lg shadow-indigo-900/40">
-                                <Eye size={20} /> Enable Camera &amp; Begin
+                                className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-8 py-3 rounded-xl flex items-center gap-2 transition-all">
+                                <Eye size={16} /> Start Setup
                             </button>
                         </motion.div>
                     )}
                     {!errorMsg && phase === "starting" && (
-                        <motion.div key="starting" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center space-y-6">
-                            <div className="w-20 h-20 mx-auto relative">
-                                <div className="absolute inset-0 rounded-full border-2 border-indigo-500/30 border-t-indigo-400 animate-spin" />
-                            </div>
-                            <p className="text-white/70 font-bold text-xl">{initStatus}</p>
+                        <motion.div key="starting" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center space-y-4">
+                            <div className="w-10 h-10 mx-auto border-2 border-white/20 border-t-white/60 rounded-full animate-spin" />
+                            <p className="text-white/50 text-sm">{initStatus}</p>
                         </motion.div>
                     )}
                     {!errorMsg && phase === "calibrating" && currentPoint && (
                         <motion.div key="calibrating" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0">
-                            {/* Top HUD */}
+                            {/* Top progress bar */}
                             <div className="absolute top-6 left-8 right-8 z-20">
                                 <div className="flex justify-between mb-2">
-                                    <span className="text-white/40 text-[11px] uppercase tracking-widest">
-                                        Point {currentPointIdx + 1} / {calibPoints.length}
+                                    <span className="text-white/30 text-xs">
+                                        Step {currentPointIdx + 1} of {calibPoints.length}
                                     </span>
-                                    <span className="text-white/40 text-[11px] uppercase tracking-widest">
-                                        {isCollecting ? `Capturing ${capturedCount}/${SAMPLES_PER_POINT}` : `Ready in ${dotCountdown}s…`}
+                                    <span className="text-white/30 text-xs">
+                                        {isCollecting ? "Hold still…" : `Starting in ${dotCountdown}s`}
                                     </span>
                                 </div>
                                 <div className="h-[2px] bg-white/10 rounded-full overflow-hidden">
@@ -324,9 +327,9 @@ export default function CalibrationPage() {
                             </div>
                             {/* Bottom instruction */}
                             <div className="absolute bottom-10 left-0 right-0 flex justify-center z-20">
-                                <div className="bg-white/5 border border-white/10 px-8 py-4 rounded-2xl backdrop-blur-sm">
-                                    <p className="text-white/50 text-sm uppercase tracking-widest">
-                                        {isCollecting ? "Hold your gaze — capturing…" : "Look at the dot and hold still"}
+                                <div className="bg-white/5 border border-white/10 px-6 py-3 rounded-xl">
+                                    <p className="text-white/40 text-xs">
+                                        {isCollecting ? "Keep looking at the dot…" : "Look at the dot and hold still"}
                                     </p>
                                 </div>
                             </div>
@@ -343,9 +346,7 @@ export default function CalibrationPage() {
                                         style={{ width: 40, height: 40, margin: -12 }} />
                                     {/* Core dot */}
                                     <div className={`w-5 h-5 rounded-full transition-colors duration-300 ${
-                                        isCollecting
-                                            ? "bg-emerald-400 shadow-[0_0_30px_10px_rgba(52,211,153,0.9)]"
-                                            : "bg-white shadow-[0_0_30px_10px_rgba(255,255,255,0.6)]"
+                                        isCollecting ? "bg-emerald-400" : "bg-white"
                                     }`} />
                                     {/* Progress ring */}
                                     <svg className="absolute -rotate-90" width={52} height={52} style={{ top: -16, left: -16 }}>
@@ -362,43 +363,41 @@ export default function CalibrationPage() {
                     )}
                     {!errorMsg && phase === "submitting" && (
                         <motion.div key="submitting" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center">
-                            <div className="w-16 h-16 border-2 border-indigo-500/40 border-t-indigo-400 rounded-full animate-spin mx-auto mb-6" />
-                            <p className="text-white/50 text-sm uppercase tracking-widest">Computing your gaze profile…</p>
+                            <div className="w-10 h-10 border-2 border-white/20 border-t-white/60 rounded-full animate-spin mx-auto mb-4" />
+                            <p className="text-white/30 text-sm">Almost ready…</p>
                         </motion.div>
                     )}
                     {!errorMsg && phase === "result" && (
                         <motion.div key="result" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                            className="z-10 flex flex-col items-center text-center max-w-md px-8">
+                            className="z-10 flex flex-col items-center text-center max-w-sm px-8">
                             {needsRecalibration ? (
                                 <>
-                                    <div className="w-20 h-20 rounded-[1.5rem] bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-6">
-                                        <AlertTriangle size={36} className="text-amber-400" strokeWidth={1.5} />
+                                    <div className="w-16 h-16 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-5">
+                                        <AlertTriangle size={28} className="text-amber-400" strokeWidth={1.5} />
                                     </div>
-                                    <h2 className="text-white text-4xl font-black italic tracking-tighter mb-3">Low Accuracy</h2>
-                                    <p className="text-white/50 text-base mb-1">Quality: <span className="text-amber-400 font-semibold">{pct}%</span> <span className="text-white/30">(60% required)</span></p>
-                                    <p className="text-white/30 text-sm mb-8">Tip: improve lighting, sit closer, look at the centre of each dot.</p>
-                                    <div className="flex flex-col gap-3 w-full">
+                                    <h2 className="text-white text-xl font-semibold mb-2">Setup Needs Improvement</h2>
+                                    <p className="text-white/40 text-sm mb-6 leading-relaxed">Try improving your lighting, sitting a bit closer, and looking directly at the centre of each dot.</p>
+                                    <div className="flex flex-col gap-2 w-full">
                                         <button onClick={retryCalibration}
-                                            className="bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-black text-sm uppercase tracking-[0.15em] px-10 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all">
-                                            <RefreshCw size={18} /> Try Again
+                                            className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-8 py-3 rounded-xl flex items-center justify-center gap-2 transition-all">
+                                            <RefreshCw size={15} /> Try Again
                                         </button>
                                         <button onClick={() => router.push("/portal/instructions")}
-                                            className="bg-white/5 hover:bg-white/10 active:scale-95 text-white/60 font-black text-sm uppercase tracking-[0.15em] px-10 py-4 rounded-2xl flex items-center justify-center gap-3 transition-all border border-white/10">
-                                            <SkipForward size={18} /> Proceed Anyway
+                                            className="bg-white/5 hover:bg-white/10 text-white/50 font-medium text-sm px-8 py-3 rounded-xl flex items-center justify-center gap-2 transition-all border border-white/10">
+                                            <SkipForward size={15} /> Continue Anyway
                                         </button>
                                     </div>
                                 </>
                             ) : (
                                 <>
-                                    <div className="w-20 h-20 rounded-[1.5rem] bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mb-6">
-                                        <CheckCircle size={36} className="text-emerald-400" strokeWidth={1.5} />
+                                    <div className="w-16 h-16 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mb-5">
+                                        <CheckCircle size={28} className="text-emerald-400" strokeWidth={1.5} />
                                     </div>
-                                    <h2 className="text-white text-4xl font-black italic tracking-tighter mb-3">Calibration Complete</h2>
-                                    <p className="text-white/50 text-base mb-1">Quality: <span className="text-emerald-400 font-semibold">{pct}%</span></p>
-                                    <p className="text-white/30 text-sm mb-10">Gaze tracking is personalised to your eyes and screen.</p>
+                                    <h2 className="text-white text-xl font-semibold mb-2">Setup Complete</h2>
+                                    <p className="text-white/40 text-sm mb-8">You&apos;re all set. Your interview is ready to begin.</p>
                                     <button onClick={() => router.push("/portal/instructions")}
-                                        className="bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-black text-sm uppercase tracking-[0.15em] px-10 py-5 rounded-2xl flex items-center gap-3 transition-all shadow-lg shadow-indigo-900/40">
-                                        Continue to Interview <ArrowRight size={20} />
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm px-8 py-3 rounded-xl flex items-center gap-2 transition-all">
+                                        Continue <ArrowRight size={16} />
                                     </button>
                                 </>
                             )}

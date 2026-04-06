@@ -1,4 +1,4 @@
-"""Cloudinary client for NeuroSync AI — upload, download, delete.
+"""Cloudinary client for Examiney.AI — upload, download, delete.
 
 Design goals:
  - No persistent local media storage (uploads use in-memory bytes)
@@ -8,18 +8,23 @@ Design goals:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Dict, Optional
 
 import cloudinary
 import cloudinary.api
 import cloudinary.uploader
-from dotenv import load_dotenv
 
-load_dotenv()
+logger = logging.getLogger(__name__)
+
+_configured = False
 
 
 def _config() -> None:
+    global _configured
+    if _configured:
+        return
     # Cloudinary Python SDK supports either:
     # - CLOUDINARY_URL, or
     # - cloud_name + api_key + api_secret.
@@ -29,6 +34,7 @@ def _config() -> None:
     cloudinary_url = os.getenv("CLOUDINARY_URL", "").strip()
     if cloudinary_url:
         cloudinary.config(cloudinary_url=cloudinary_url, secure=True)
+        _configured = True
         return
 
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "").strip()
@@ -40,6 +46,7 @@ def _config() -> None:
             "CLOUDINARY_CLOUD_NAME + CLOUDINARY_API_KEY + CLOUDINARY_API_SECRET."
         )
     cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+    _configured = True
 
 
 def build_session_folder(login_id: str, session_id: str) -> str:
@@ -101,9 +108,9 @@ def delete_by_prefix(*, prefix: str, resource_type: str = "video") -> int:
             invalidate=True,
         )
         deleted += len(result.get("deleted", {}))
-        print(f"[VidyaAI][Cloudinary] delete_by_prefix prefix={prefix!r} resource_type={resource_type} → {deleted} deleted")
+        logger.info(f"[Examiney][Cloudinary] delete_by_prefix prefix={prefix!r} resource_type={resource_type} -> {deleted} deleted")
     except Exception as e:
-        print(f"[VidyaAI][Cloudinary] delete_by_prefix failed: {e}")
+        logger.error(f"[Examiney][Cloudinary] delete_by_prefix failed: {e}")
     return deleted
 
 

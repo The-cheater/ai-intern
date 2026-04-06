@@ -2,8 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import {
-    ArrowLeft, Download, CheckCircle2, AlertCircle, ShieldAlert,
-    Play, Volume2, ChevronDown, Activity, Brain, Fingerprint, BarChart, Layers, Loader2, Eye
+    ArrowLeft, CheckCircle2, AlertCircle, ShieldAlert,
+    Play, Volume2, ChevronDown, Activity, Brain, BarChart, Loader2, Eye
 } from "lucide-react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
@@ -22,6 +22,7 @@ interface QuestionResponse {
     id: number;
     question_id: string;
     question_text: string;
+    ideal_answer: string | null;
     transcript: string;
     semantic_score: number;
     sentiment: Record<string, number>;
@@ -36,6 +37,10 @@ interface QuestionResponse {
     video_url: string | null;
     audio_url: string | null;
     transcript_flagged: boolean;
+    llm_verdict: string | null;
+    llm_verdict_reason: string | null;
+    llm_key_gaps: string[] | null;
+    llm_strengths: string[] | null;
 }
 
 interface GazeMetrics {
@@ -72,6 +77,9 @@ interface OceanReport {
     job_fit_score: number;
     success_prediction: string;
     role_recommendation: string;
+    ocean_confidence?: string;
+    trait_coverage?: Record<string, string>;   // "full" | "partial" | "limited" | "none"
+    stages_covered?: string[];
 }
 
 interface FullReport {
@@ -79,12 +87,31 @@ interface FullReport {
     question_responses: QuestionResponse[];
     video_signals: VideoSignal[];
     ocean_report: OceanReport | null;
+    interview_completed: boolean;
 }
 
 const OCEAN_COLORS = ["#6C63FF","#22C55E","#F59E0B","#3B82F6","#EF4444"];
 const PIE_COLORS   = ["#6C63FF","#22C55E","#F59E0B","#EF4444","#3B82F6","#8B5CF6","#06B6D4","#F97316"];
 
-export default function CandidateInsight({ params }: { params: { id: string } }) {
+// ── Trait coverage helpers ─────────────────────────────────────────────────────
+const COVERAGE_BADGE: Record<string, { label: string; cls: string }> = {
+    full:    { label: "Full data",    cls: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" },
+    partial: { label: "Partial data", cls: "bg-amber-500/10  text-amber-400  border-amber-500/20"  },
+    limited: { label: "Limited data", cls: "bg-orange-500/10 text-orange-400 border-orange-500/20" },
+    none:    { label: "No data",      cls: "bg-slate-700/50  text-slate-500  border-slate-600/20"  },
+};
+
+// Which question stages provide meaningful signal for each trait
+const TRAIT_STAGE_HINT: Record<string, string> = {
+    openness:          "technical, logical, behavioral, situational",
+    conscientiousness: "technical, logical, behavioral, situational",
+    extraversion:      "behavioral, situational",
+    agreeableness:     "behavioral, situational",
+    neuroticism:       "behavioral, situational, technical, logical",
+};
+
+export default function CandidateInsight({ params }: { params: Promise<{ id: string }> }) {
+    const { id } = React.use(params);
     const [report, setReport]       = useState<FullReport | null>(null);
     const [loading, setLoading]     = useState(true);
     const [activeTab, setActiveTab] = useState("overview");
@@ -93,15 +120,15 @@ export default function CandidateInsight({ params }: { params: { id: string } })
     useEffect(() => {
         (async () => {
             try {
-                const res = await fetch(`${API}/session/${params.id}/report`);
+                const res = await fetch(`${API}/session/${id}/report`);
                 if (res.ok) setReport(await res.json());
             } catch (e) {
-                console.error("[VidyaAI][CandidateInsight]", e);
+                console.error("[Examiney][CandidateInsight]", e);
             } finally {
                 setLoading(false);
             }
         })();
-    }, [params.id]);
+    }, [id]);
 
     if (loading) return (
         <div className="flex items-center justify-center h-96 gap-4 text-slate-400">
@@ -146,10 +173,12 @@ export default function CandidateInsight({ params }: { params: { id: string } })
 
     const hrvData = vs.map((v, i) => ({ name: `Q${i + 1}`, hrv: v.avg_hrv_rmssd, hr: v.hr_bpm ?? 0 }));
 
-    const predColor = ocean?.success_prediction === "High" ? "text-success"
-        : ocean?.success_prediction === "Medium" ? "text-warning" : "text-danger";
-    const successPct = ocean?.success_prediction === "High" ? 82
-        : ocean?.success_prediction === "Medium" ? 55 : 30;
+    const predColor = !ocean ? "text-slate-500"
+        : ocean.success_prediction === "High" ? "text-success"
+        : ocean.success_prediction === "Medium" ? "text-warning" : "text-danger";
+    const successPct = !ocean ? 0
+        : ocean.success_prediction === "High" ? 82
+        : ocean.success_prediction === "Medium" ? 55 : 30;
 
     // Aggregate gaze zone distribution from GazeFollower metrics across questions
     const gazeAgg: Record<string, number> = {};
@@ -176,10 +205,9 @@ export default function CandidateInsight({ params }: { params: { id: string } })
     });
 
     const tabs = [
-        { id: "overview",   label: "Overview",      icon: Brain },
-        { id: "gaze",       label: "Gaze & Signals", icon: Eye },
-        { id: "questions",  label: "Per-Question",  icon: BarChart },
-        { id: "media",      label: "Raw Media",     icon: Layers },
+        { id: "overview",   label: "Overview",       icon: Brain },
+        { id: "gaze",       label: "Focus & Signals", icon: Eye },
+        { id: "questions",  label: "Per-Question",   icon: BarChart },
     ];
 
     return (
@@ -188,13 +216,13 @@ export default function CandidateInsight({ params }: { params: { id: string } })
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-6">
                     <Link href={`/dashboard/openings/${session.job_opening_id}`}
-                        className="p-3 bg-slate-900 border border-white/10 rounded-xl hover:bg-slate-800 transition-colors">
+                        className="p-3 bg-white border border-border rounded-xl hover:bg-gray-50 transition-colors text-foreground/50 hover:text-foreground shadow-sm">
                         <ArrowLeft size={20} />
                     </Link>
                     <div>
                         <h1 className="font-heading text-4xl font-bold">{session.candidate_name}</h1>
                         <p className="font-body text-slate-500 text-lg mt-1">
-                            Session: <span className="text-slate-300 font-mono text-sm">{session.session_id}</span>
+                            Session: <span className="text-foreground/60 font-mono text-sm">{session.session_id}</span>
                             {" · "}{new Date(session.created_at).toLocaleDateString()}
                         </p>
                     </div>
@@ -212,7 +240,7 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                 {tabs.map(({ id, label, icon: Icon }) => (
                     <button key={id} onClick={() => setActiveTab(id)}
                         className={`flex items-center gap-2 px-6 py-3 rounded-xl font-ui text-sm font-bold tracking-wide transition-all
-                            ${activeTab === id ? "bg-primary text-white shadow-violet" : "text-slate-400 hover:text-slate-200"}`}>
+                            ${activeTab === id ? "bg-primary text-white shadow-violet" : "text-slate-500 hover:text-foreground"}`}>
                         <Icon size={16} /> {label}
                     </button>
                 ))}
@@ -220,6 +248,32 @@ export default function CandidateInsight({ params }: { params: { id: string } })
 
             {/* ── Overview Tab ──────────────────────────────────────────────────── */}
             {activeTab === "overview" && (
+                <div className="space-y-8">
+                {/* Coverage warning — shown when key traits have limited/no data */}
+                {ocean?.trait_coverage && (() => {
+                    const weakTraits = (["agreeableness","extraversion","neuroticism","openness","conscientiousness"] as const)
+                        .filter(t => ["limited","none"].includes(ocean.trait_coverage![t] ?? "none"));
+                    const missingStages = (["behavioral","situational","logical","technical"] as const)
+                        .filter(s => !(ocean.stages_covered ?? []).includes(s));
+                    if (weakTraits.length === 0) return null;
+                    return (
+                        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 px-5 py-4 flex gap-3">
+                            <AlertCircle size={18} className="text-amber-400 shrink-0 mt-0.5" />
+                            <div className="text-sm">
+                                <p className="text-amber-300 font-bold mb-1">
+                                    Limited OCEAN coverage — {weakTraits.length} trait{weakTraits.length > 1 ? "s" : ""} based on insufficient question data
+                                </p>
+                                <p className="text-amber-400/70 leading-relaxed">
+                                    <span className="capitalize">{weakTraits.join(", ")}</span> could not be fully assessed
+                                    {missingStages.length > 0 && (
+                                        <> because <span className="font-semibold">{missingStages.join(", ")}</span> question{missingStages.length > 1 ? "s were" : " was"} not included in this interview.</>
+                                    )}.
+                                    Scores for these traits are estimates only — treat them with caution or re-run the interview with a richer question mix.
+                                </p>
+                            </div>
+                        </div>
+                    );
+                })()}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                     {/* Left: success ring + OCEAN radar + sentiment */}
                     <div className="lg:col-span-2 space-y-8">
@@ -227,38 +281,78 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                             {/* 6-month success ring */}
                             <div className="glass-card p-8 rounded-3xl border border-white/10 flex flex-col items-center justify-center gap-4">
                                 <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black">6-Month Success Probability</p>
-                                <div className="relative w-36 h-36">
-                                    <svg className="w-full h-full -rotate-90">
-                                        <circle cx="72" cy="72" r="62" fill="transparent" stroke="#1E293B" strokeWidth="10" />
-                                        <circle cx="72" cy="72" r="62" fill="transparent"
-                                            stroke="#6C63FF" strokeWidth="10"
-                                            strokeDasharray={`${2 * Math.PI * 62}`}
-                                            strokeDashoffset={`${2 * Math.PI * 62 * (1 - successPct / 100)}`}
-                                            strokeLinecap="round" />
-                                    </svg>
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                        <span className="font-heading text-3xl font-black">{successPct}%</span>
-                                        <span className={`font-ui text-xs font-black uppercase ${predColor}`}>{ocean?.success_prediction ?? "—"}</span>
+                                {!report.interview_completed ? (
+                                    <div className="flex flex-col items-center justify-center gap-3 py-4">
+                                        <div className="w-20 h-20 rounded-full border-4 border-dashed border-slate-700 flex items-center justify-center">
+                                            <span className="font-heading text-2xl font-black text-slate-600">—</span>
+                                        </div>
+                                        <p className="font-ui text-xs text-slate-600 uppercase tracking-widest text-center">Interview not taken</p>
                                     </div>
-                                </div>
-                                <p className="font-ui text-xs text-slate-500 text-center leading-relaxed max-w-[200px]">
-                                    Job Fit: <span className="text-white font-bold">{ocean?.job_fit_score?.toFixed(1) ?? "—"}/100</span>
-                                </p>
+                                ) : (
+                                    <>
+                                        <div className="relative w-36 h-36">
+                                            <svg className="w-full h-full -rotate-90">
+                                                <circle cx="72" cy="72" r="62" fill="transparent" stroke="#e5e7eb" strokeWidth="10" />
+                                                <circle cx="72" cy="72" r="62" fill="transparent"
+                                                    stroke="#6C63FF" strokeWidth="10"
+                                                    strokeDasharray={`${2 * Math.PI * 62}`}
+                                                    strokeDashoffset={`${2 * Math.PI * 62 * (1 - successPct / 100)}`}
+                                                    strokeLinecap="round" />
+                                            </svg>
+                                            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                                <span className="font-heading text-3xl font-black">{successPct}%</span>
+                                                <span className={`font-ui text-xs font-black uppercase ${predColor}`}>{ocean?.success_prediction ?? "—"}</span>
+                                            </div>
+                                        </div>
+                                        <p className="font-ui text-xs text-slate-500 text-center leading-relaxed max-w-[200px]">
+                                            Job Fit: <span className="text-foreground font-bold">{ocean?.job_fit_score?.toFixed(1) ?? "—"}/100</span>
+                                        </p>
+                                    </>
+                                )}
                             </div>
 
-                            {/* OCEAN radar */}
+                            {/* OCEAN radar + coverage */}
                             <div className="glass-card p-6 rounded-3xl border border-white/10">
-                                <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black mb-4">Big Five OCEAN</p>
+                                <div className="flex items-center justify-between mb-1">
+                                    <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black">Big Five OCEAN</p>
+                                    {ocean?.ocean_confidence && (
+                                        <span className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border
+                                            ${ocean.ocean_confidence === "High"   ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                            : ocean.ocean_confidence === "Medium" ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                            :                                       "bg-slate-700/50 text-slate-500 border-slate-600/20"}`}>
+                                            {ocean.ocean_confidence} confidence
+                                        </span>
+                                    )}
+                                </div>
                                 {ocean ? (
-                                    <ResponsiveContainer width="100%" height={200}>
-                                        <RadarChart data={oceanData}>
-                                            <PolarGrid stroke="#1E293B" />
-                                            <PolarAngleAxis dataKey="subject" tick={{ fill: "#64748B", fontSize: 10 }} />
-                                            <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
-                                            <Radar name="OCEAN" dataKey="A" stroke="#6C63FF" fill="#6C63FF" fillOpacity={0.3} />
-                                        </RadarChart>
-                                    </ResponsiveContainer>
-                                ) : <div className="h-48 flex items-center justify-center text-slate-600 text-sm">Processing…</div>}
+                                    <>
+                                        <ResponsiveContainer width="100%" height={180}>
+                                            <RadarChart data={oceanData}>
+                                                <PolarGrid stroke="#e5e7eb" />
+                                                <PolarAngleAxis dataKey="subject" tick={{ fill: "#6b7280", fontSize: 10 }} />
+                                                <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
+                                                <Radar name="OCEAN" dataKey="A" stroke="#6C63FF" fill="#6C63FF" fillOpacity={0.3} />
+                                            </RadarChart>
+                                        </ResponsiveContainer>
+                                        {/* Per-trait coverage pills */}
+                                        {ocean.trait_coverage && (
+                                            <div className="mt-3 space-y-1.5">
+                                                {(["openness","conscientiousness","extraversion","agreeableness","neuroticism"] as const).map(trait => {
+                                                    const cov = ocean.trait_coverage![trait] ?? "none";
+                                                    const badge = COVERAGE_BADGE[cov] ?? COVERAGE_BADGE.none;
+                                                    return (
+                                                        <div key={trait} className="flex items-center justify-between text-[10px]" title={`Needs: ${TRAIT_STAGE_HINT[trait]}`}>
+                                                            <span className="text-slate-500 capitalize">{trait}</span>
+                                                            <span className={`px-2 py-0.5 rounded-full border font-black uppercase tracking-wide ${badge.cls}`}>
+                                                                {badge.label}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </>
+                                ) : <div className="h-48 flex items-center justify-center text-slate-600 text-sm">{report.interview_completed ? "Processing…" : "No interview data"}</div>}
                             </div>
                         </div>
 
@@ -267,10 +361,10 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                             <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black mb-6">Sentiment Timeline</p>
                             <ResponsiveContainer width="100%" height={180}>
                                 <LineChart data={sentimentData}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-                                    <XAxis dataKey="name" tick={{ fill: "#64748B", fontSize: 11 }} />
-                                    <YAxis domain={[0, 100]} tick={{ fill: "#64748B", fontSize: 11 }} />
-                                    <Tooltip contentStyle={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 12 }} />
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                                    <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                                    <YAxis domain={[0, 100]} tick={{ fill: "#6b7280", fontSize: 11 }} />
+                                    <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, color: "#1f2937" }} />
                                     <Line type="monotone" dataKey="score" stroke="#6C63FF" strokeWidth={2} dot={{ fill: "#6C63FF", r: 4 }} />
                                 </LineChart>
                             </ResponsiveContainer>
@@ -288,7 +382,7 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                             label={({ name, percent }) => (percent as number) > 0.08 ? `${name} ${Math.round((percent as number) * 100)}%` : ""}>
                                             {emotionPieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
                                         </Pie>
-                                        <Tooltip contentStyle={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 12 }} />
+                                        <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, color: "#1f2937" }} />
                                     </RechartsPieChart>
                                 </ResponsiveContainer>
                             ) : <div className="h-44 flex items-center justify-center text-slate-600 text-sm">No emotion data</div>}
@@ -296,12 +390,33 @@ export default function CandidateInsight({ params }: { params: { id: string } })
 
                         {[
                             { label: "Cognitive Load Resilience", value: ocean ? Math.round(100 - ocean.neuroticism) : null, color: "text-primary" },
-                            { label: "Authenticity Baseline",     value: qs.length ? Math.round(qs.reduce((a, q) => a + (q.authenticity_score ?? 5), 0) / qs.length * 10) : null, color: "text-success" },
-                            { label: "Logical Efficiency",        value: qs.length ? Math.round(qs.reduce((a, q) => a + (q.technical_score ?? 5), 0) / qs.length * 10) : null, color: "text-warning" },
+                            {
+                                label: "Authenticity Baseline",
+                                value: (() => {
+                                    const scores = qs.map(q => q.authenticity_score).filter(s => s !== null && s !== undefined);
+                                    if (scores.length === 0) return null;
+                                    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+                                    return Math.round(avg * 10);
+                                })(),
+                                color: "text-success"
+                            },
+                            {
+                                label: "Logical Efficiency",
+                                value: (() => {
+                                    const scores = qs.map(q => q.technical_score).filter(s => s !== null && s !== undefined);
+                                    if (scores.length === 0) return null;
+                                    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+                                    return Math.round(avg * 10);
+                                })(),
+                                color: "text-warning"
+                            },
                         ].map(({ label, value, color }) => (
                             <div key={label} className="glass-card p-6 rounded-3xl border border-white/10">
                                 <p className="font-ui text-[10px] text-slate-500 uppercase tracking-widest font-black mb-3">{label}</p>
                                 <p className={`font-heading text-4xl font-black ${color}`}>{value !== null ? `${value}%` : "—"}</p>
+                                {value === null && (
+                                    <p className="font-ui text-[9px] text-slate-600 mt-2">Scoring unavailable</p>
+                                )}
                             </div>
                         ))}
 
@@ -315,6 +430,7 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                             </div>
                         )}
                     </div>
+                </div>
                 </div>
             )}
 
@@ -339,14 +455,14 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                         {/* Gaze zone distribution bar chart */}
                         <div className="glass-card p-8 rounded-3xl border border-white/10">
-                            <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black mb-6">Avg Gaze Zone Distribution</p>
+                            <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black mb-6">Avg Attention Zone Distribution</p>
                             {gazeBarData.length > 0 ? (
                                 <ResponsiveContainer width="100%" height={200}>
                                     <RechartsBarChart data={gazeBarData} barCategoryGap="30%">
-                                        <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-                                        <XAxis dataKey="zone" tick={{ fill: "#64748B", fontSize: 12 }} />
-                                        <YAxis domain={[0, 100]} tick={{ fill: "#64748B", fontSize: 11 }} unit="%" />
-                                        <Tooltip contentStyle={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 12 }}
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                                        <XAxis dataKey="zone" tick={{ fill: "#6b7280", fontSize: 12 }} />
+                                        <YAxis domain={[0, 100]} tick={{ fill: "#6b7280", fontSize: 11 }} unit="%" />
+                                        <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, color: "#1f2937" }}
                                             formatter={(v: number) => [`${v}%`, "Percentage"]} />
                                         <Bar dataKey="pct" radius={[6, 6, 0, 0]}>
                                             {gazeBarData.map((entry, i) => (
@@ -355,7 +471,7 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                         </Bar>
                                     </RechartsBarChart>
                                 </ResponsiveContainer>
-                            ) : <div className="h-48 flex items-center justify-center text-slate-600 text-sm">No gaze data</div>}
+                            ) : <div className="h-48 flex items-center justify-center text-slate-600 text-sm">No attention data available</div>}
                             <p className="text-slate-600 text-[10px] mt-4 font-ui">
                                 Red = looking down (notes); Strategic = upper-center (thinking); Neutral = normal engagement
                             </p>
@@ -376,10 +492,10 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                             <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
                                         </linearGradient>
                                     </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-                                    <XAxis dataKey="name" tick={{ fill: "#64748B", fontSize: 11 }} />
-                                    <YAxis tick={{ fill: "#64748B", fontSize: 11 }} />
-                                    <Tooltip contentStyle={{ background: "#0F172A", border: "1px solid #1E293B", borderRadius: 12 }} />
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                                    <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                                    <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} />
+                                    <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 12, color: "#1f2937" }} />
                                     <Area type="monotone" dataKey="hrv" stroke="#22C55E" fill="url(#hrv)" strokeWidth={2} name="HRV ms" />
                                     <Area type="monotone" dataKey="hr" stroke="#3B82F6" fill="url(#hr)" strokeWidth={2} name="HR bpm" />
                                 </AreaChart>
@@ -387,11 +503,11 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                         </div>
                     </div>
 
-                    {/* Per-question gaze analysis from GazeFollower */}
+                    {/* Per-question attention analysis */}
                     <div className="glass-card p-8 rounded-3xl border border-white/10">
                         <div className="flex items-center gap-3 mb-6">
                             <Eye size={20} className="text-primary" />
-                            <h3 className="font-heading text-xl font-bold">GazeFollower Analysis — Per Question</h3>
+                            <h3 className="font-heading text-xl font-bold">Eye Tracking — Per Question</h3>
                         </div>
                         {vs.length === 0 && (
                             <p className="text-slate-500 text-sm text-center py-8">No video signal data recorded.</p>
@@ -405,6 +521,7 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                 const isHighRisk = highestRisk === "high" || highestRisk === "medium";
                                 const zones = gm?.zone_distribution ?? v.gaze_zone_distribution ?? {};
                                 const robotic = gm?.robotic_reading;
+                                const qMatch = qs.find(q => q.question_id === v.question_id);
 
                                 return (
                                     <div key={i} className={`rounded-2xl border p-5 ${isHighRisk ? "border-danger/30 bg-danger/5" : "border-white/5 bg-slate-900/30"}`}>
@@ -426,14 +543,14 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                                 )}
                                             </div>
                                             <div className="flex items-center gap-4 text-xs text-slate-400 font-ui">
-                                                {gm?.status === "not_installed" && <span className="text-slate-600 italic">GazeFollower not installed</span>}
-                                                {gm?.gaze_points_count != null && <span>{gm.gaze_points_count} gaze pts</span>}
+                                                {gm?.status === "not_installed" && <span className="text-slate-600 italic">Eye tracking unavailable</span>}
+                                                {gm?.gaze_points_count != null && <span>{gm.gaze_points_count} tracking pts</span>}
                                                 {v.hr_bpm != null && <span>{Math.round(v.hr_bpm)} bpm</span>}
                                                 <span>HRV {v.avg_hrv_rmssd?.toFixed(1) ?? "—"} ms</span>
                                             </div>
                                         </div>
 
-                                        {/* Gaze zones */}
+                                        {/* Attention zones */}
                                         {Object.keys(zones).length > 0 && (
                                             <div className="flex gap-3 mb-4">
                                                 {Object.entries(zones).map(([zone, pct]) => (
@@ -473,6 +590,33 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                                 ))}
                                             </div>
                                         )}
+
+                                        {/* Video + audio players for this question */}
+                                        {(qMatch?.video_url || qMatch?.audio_url) && (
+                                            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-white/5 pt-4">
+                                                {qMatch?.video_url && (
+                                                    <div>
+                                                        <p className="font-ui text-[9px] text-slate-500 uppercase tracking-widest mb-2">Video Recording</p>
+                                                        <video
+                                                            src={qMatch.video_url}
+                                                            controls
+                                                            className="w-full rounded-xl border border-border bg-black"
+                                                            style={{ maxHeight: 180 }}
+                                                        />
+                                                    </div>
+                                                )}
+                                                {qMatch?.audio_url && (
+                                                    <div>
+                                                        <p className="font-ui text-[9px] text-slate-500 uppercase tracking-widest mb-2">Audio Recording</p>
+                                                        <audio
+                                                            src={qMatch.audio_url}
+                                                            controls
+                                                            className="w-full rounded-xl"
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })}
@@ -496,6 +640,17 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                         const cheatRisk = (riskRank[gfRisk] ?? 0) >= (riskRank[rtRisk] ?? 0) ? gfRisk : rtRisk;
                         const hasCheatFlag = cheatRisk === "high" || cheatRisk === "medium";
 
+                        // Verdict badge config
+                        const verdictCfg: Record<string, { label: string; color: string }> = {
+                            correct:           { label: "Correct",           color: "bg-success/10 text-success border-success/30" },
+                            partially_correct: { label: "Partial",           color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
+                            can_be_better:     { label: "Can Be Better",     color: "bg-warning/10 text-warning border-warning/30" },
+                            incorrect:         { label: "Incorrect",         color: "bg-danger/10 text-danger border-danger/30" },
+                            not_attempted:     { label: "Not Attempted",     color: "bg-slate-700/40 text-slate-400 border-slate-600/30" },
+                        };
+                        const verdict = q.llm_verdict ?? null;
+                        const vCfg = verdict ? (verdictCfg[verdict] ?? verdictCfg.incorrect) : null;
+
                         return (
                             <div key={q.id} className={`glass-card rounded-3xl border transition-all ${hasCheatFlag ? "border-danger/30" : "border-white/5"}`}>
                                 <button className="w-full px-8 py-6 flex items-center justify-between text-left"
@@ -506,7 +661,12 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                         {q.transcript_flagged && <AlertCircle size={18} className="text-warning" />}
                                         <p className="font-body text-slate-200 text-base line-clamp-1 max-w-2xl">{q.question_text}</p>
                                     </div>
-                                    <div className="flex items-center gap-6 ml-4 flex-shrink-0">
+                                    <div className="flex items-center gap-3 ml-4 flex-shrink-0">
+                                        {vCfg && (
+                                            <span className={`px-3 py-1 rounded-full font-ui font-black text-xs uppercase tracking-widest border ${vCfg.color}`}>
+                                                {vCfg.label}
+                                            </span>
+                                        )}
                                         <span className={`px-3 py-1 rounded-full font-heading font-bold text-sm border
                                             ${q.combined_score >= 7 ? "bg-success/10 text-success border-success/20"
                                             : q.combined_score >= 4 ? "bg-warning/10 text-warning border-warning/20"
@@ -535,6 +695,49 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                                         {q.transcript || <span className="text-slate-600 italic">No transcript</span>}
                                                     </p>
                                                 </div>
+
+                                                {/* LLM Verdict */}
+                                                {verdict && vCfg && (
+                                                    <div className={`rounded-2xl border p-5 ${vCfg.color.includes("success") ? "bg-success/5 border-success/20" : vCfg.color.includes("blue") ? "bg-blue-500/5 border-blue-500/20" : vCfg.color.includes("warning") ? "bg-warning/5 border-warning/20" : vCfg.color.includes("danger") ? "bg-danger/5 border-danger/20" : "bg-slate-800/40 border-slate-700/30"}`}>
+                                                        <div className="flex items-center gap-3 mb-3">
+                                                            <span className={`px-3 py-1 rounded-full font-ui font-black text-xs uppercase tracking-widest border ${vCfg.color}`}>
+                                                                {vCfg.label}
+                                                            </span>
+                                                            <p className="font-ui text-xs text-slate-500 uppercase tracking-widest font-black">AI Verdict</p>
+                                                        </div>
+                                                        {q.llm_verdict_reason && (
+                                                            <p className="font-body text-sm text-slate-300 leading-relaxed mb-4">{q.llm_verdict_reason}</p>
+                                                        )}
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                                            {(q.llm_strengths?.length ?? 0) > 0 && (
+                                                                <div>
+                                                                    <p className="font-ui text-[9px] text-success uppercase tracking-widest font-black mb-2">Strengths</p>
+                                                                    <ul className="space-y-1">
+                                                                        {q.llm_strengths!.map((s, si) => (
+                                                                            <li key={si} className="flex items-start gap-2 text-xs text-slate-300 font-body">
+                                                                                <CheckCircle2 size={12} className="text-success mt-0.5 flex-shrink-0" />
+                                                                                {s}
+                                                                            </li>
+                                                                        ))}
+                                                                    </ul>
+                                                                </div>
+                                                            )}
+                                                            {(q.llm_key_gaps?.length ?? 0) > 0 && (
+                                                                <div>
+                                                                    <p className="font-ui text-[9px] text-danger uppercase tracking-widest font-black mb-2">Key Gaps</p>
+                                                                    <ul className="space-y-1">
+                                                                        {q.llm_key_gaps!.map((g, gi) => (
+                                                                            <li key={gi} className="flex items-start gap-2 text-xs text-slate-300 font-body">
+                                                                                <AlertCircle size={12} className="text-danger mt-0.5 flex-shrink-0" />
+                                                                                {g}
+                                                                            </li>
+                                                                        ))}
+                                                                    </ul>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                )}
 
                                                 {/* Score bars */}
                                                 <div>
@@ -568,17 +771,17 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                                                                 Risk Level: {cheatRisk.toUpperCase()}
                                                             </p>
                                                             <p className="font-body text-sm mt-1 opacity-80">
-                                                                Suspicious gaze patterns detected during this response.
+                                                                Unusual eye movement patterns detected during this response.
                                                             </p>
                                                         </div>
                                                     </div>
                                                 )}
 
-                                                {/* Gaze zone distribution (best available source) */}
+                                                {/* Attention zone distribution (best available source) */}
                                                 {signal && Object.keys(signal.gaze_metrics?.zone_distribution ?? signal.gaze_zone_distribution ?? {}).length > 0 && (
                                                     <div>
                                                         <p className="font-ui text-[10px] text-slate-500 uppercase tracking-widest mb-4 font-black">
-                                                            Gaze Zones {signal.gaze_metrics?.provider === "gazefollower" ? "(GazeFollower)" : "(Real-time)"}
+                                                            Focus Areas
                                                         </p>
                                                         <div className="flex gap-4">
                                                             {Object.entries(signal.gaze_metrics?.zone_distribution ?? signal.gaze_zone_distribution).map(([zone, pct]) => (
@@ -629,37 +832,6 @@ export default function CandidateInsight({ params }: { params: { id: string } })
                 </div>
             )}
 
-            {/* ── Raw Media Tab ─────────────────────────────────────────────────── */}
-            {activeTab === "media" && (
-                <div className="space-y-8">
-                    <div className="glass-card p-8 rounded-3xl border border-white/10">
-                        <div className="flex items-center gap-3 mb-6">
-                            <Fingerprint size={20} className="text-primary" />
-                            <h3 className="font-heading text-xl font-bold">All Session Media</h3>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {qs.filter(q => q.video_url || q.audio_url).map((q, i) => (
-                                <div key={q.id} className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 space-y-4">
-                                    <p className="font-ui text-xs text-slate-400 uppercase tracking-widest font-black">
-                                        Q{i + 1} — {q.question_text.slice(0, 60)}…
-                                    </p>
-                                    {q.video_url && (
-                                        <video src={q.video_url} controls className="w-full h-44 rounded-xl object-cover bg-black" />
-                                    )}
-                                    {q.audio_url && (
-                                        <audio src={q.audio_url} controls className="w-full" />
-                                    )}
-                                </div>
-                            ))}
-                            {qs.filter(q => q.video_url || q.audio_url).length === 0 && (
-                                <p className="col-span-2 text-center text-slate-600 font-ui text-sm uppercase tracking-widest py-16">
-                                    No media files uploaded yet.
-                                </p>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }

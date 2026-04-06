@@ -32,10 +32,10 @@ interface Opening {
 interface Credentials { session_id: string; job_opening_id: string; login_id: string; password: string }
 
 type QuestionMode = "auto" | "manual" | "mixed";
-interface SectionCounts { intro: number; technical: number; behavioral: number; logical: number }
+interface SectionCounts { intro: number; technical: number; behavioral: number; logical: number; situational: number }
 interface ManualQuestion {
     id: string;
-    stage: "intro" | "technical" | "behavioral" | "logical";
+    stage: "intro" | "technical" | "behavioral" | "logical" | "situational";
     question: string;
     time_window_seconds: number;
     ideal_answer: string;
@@ -63,7 +63,7 @@ function groupByOpening(sessions: Session[]): Opening[] {
     return Array.from(map.entries()).map(([id, ss]) => {
         const scored = ss.filter(s => s.ocean_summary?.job_fit_score != null);
         const avgScore = scored.length
-            ? Math.round(scored.reduce((a, s) => a + (s.ocean_summary!.job_fit_score * 100), 0) / scored.length)
+            ? Math.round(scored.reduce((a, s) => a + s.ocean_summary!.job_fit_score, 0) / scored.length)
             : 0;
         // Use job_opening_id as title — now it's either a slug or original UUID
         const rawTitle = id.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
@@ -73,7 +73,7 @@ function groupByOpening(sessions: Session[]): Opening[] {
 }
 
 const STAGE_TIMES: Record<string, number> = {
-    intro: 60, technical: 90, behavioral: 90, logical: 60,
+    intro: 60, technical: 90, behavioral: 90, logical: 60, situational: 90,
 };
 
 /* ─── Main Component ─────────────────────────────────────────────────────── */
@@ -101,7 +101,7 @@ export default function Dashboard() {
     /* step 1 — question mode */
     const [qMode, setQMode]           = useState<QuestionMode>("auto");
     const [sectionCounts, setSectionCounts] = useState<SectionCounts>({
-        intro: 3, technical: 7, behavioral: 4, logical: 4,
+        intro: 3, technical: 7, behavioral: 4, logical: 4, situational: 0,
     });
 
     /* manual questions */
@@ -180,7 +180,7 @@ export default function Dashboard() {
                 return opening ? Math.max(0, prev - opening.sessions.length) : prev;
             });
         } catch (e) {
-            console.error("[NeuroSync][DeleteOpening]", e);
+            console.error("[Examiney][DeleteOpening]", e);
             showToast("Failed to delete opening.");
         }
     };
@@ -273,140 +273,208 @@ export default function Dashboard() {
     };
 
     /* ──────────────────────────────────────────────────────────────────────── */
+    const allSessionsSorted = openings
+        .flatMap(o => o.sessions)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const globalAvgFit = (() => {
+        const scored = openings.filter(o => o.avgScore > 0);
+        return scored.length ? Math.round(scored.reduce((a, o) => a + o.avgScore, 0) / scored.length) : null;
+    })();
+    const completedCount = allSessionsSorted.filter(s => s.fit_score != null).length;
+
     return (
-        <div className="space-y-12">
+        <div className="space-y-8">
             <AnimatePresence>{toast && <Toast msg={toast} onDismiss={() => setToast(null)} />}</AnimatePresence>
 
-            {/* Header */}
+            {/* ── Page header ──────────────────────────────────────────── */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="font-heading text-4xl font-bold">Active Openings</h1>
-                    <p className="font-body text-slate-500 mt-2 text-lg italic">Select an opening to view candidate insights.</p>
+                    <h1 className="font-heading text-3xl font-bold text-foreground tracking-tight">Dashboard</h1>
+                    <p className="font-body text-foreground/40 mt-1 text-sm">AI-powered interview intelligence platform.</p>
                 </div>
-                <div className="flex items-center gap-3">
-                    <button onClick={fetchSessions} title="Refresh sessions"
-                        className="p-3 rounded-xl bg-white border border-border text-foreground/50 hover:text-foreground hover:border-foreground/20 transition-all">
-                        <RefreshCw size={18} className={sessionsLoading ? "animate-spin" : ""} />
+                <div className="flex items-center gap-2.5">
+                    <button onClick={fetchSessions} title="Refresh"
+                        className="p-3 rounded-xl bg-white border border-border text-foreground/40 hover:text-primary hover:border-primary/30 transition-all shadow-sm">
+                        <RefreshCw size={17} className={sessionsLoading ? "animate-spin" : ""} />
                     </button>
                     <button onClick={() => setIsCreating(true)}
-                        className="flex items-center gap-2 bg-primary hover:bg-primary/90 text-white font-heading font-bold px-6 py-4 rounded-xl shadow-violet transition-all group scale-100 hover:scale-105 active:scale-95">
-                        <Plus size={22} className="group-hover:rotate-90 transition-transform" />
-                        Create New Opening
+                        className="flex items-center gap-2 bg-primary hover:bg-primary/90 text-white font-heading font-bold px-5 py-3 rounded-xl shadow-violet transition-all group text-sm">
+                        <Plus size={17} className="group-hover:rotate-90 transition-transform duration-200" />
+                        New Opening
                     </button>
                 </div>
             </div>
 
-            {/* Backend error */}
+            {/* ── Stats strip ───────────────────────────────────────────── */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {([
+                    { label: "Total Candidates", value: totalCandidates, icon: Users,     accent: "text-violet-600", bg: "bg-violet-50",  border: "border-violet-100", bar: "bg-violet-500" },
+                    { label: "Active Openings",   value: openings.length, icon: Briefcase, accent: "text-blue-600",   bg: "bg-blue-50",    border: "border-blue-100",   bar: "bg-blue-500"   },
+                    { label: "Avg Fit Score", value: globalAvgFit != null ? `${globalAvgFit}%` : "—", icon: Target, accent: "text-emerald-600", bg: "bg-emerald-50", border: "border-emerald-100", bar: "bg-emerald-500" },
+                    { label: "Interviews Processed", value: completedCount ?? "—", icon: Zap, accent: "text-amber-600", bg: "bg-amber-50", border: "border-amber-100", bar: "bg-amber-500" },
+                ] as const).map(({ label, value, icon: Icon, accent, bg, border, bar }, i) => (
+                    <motion.div key={label} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}
+                        className={`relative bg-white rounded-2xl border ${border} p-5 overflow-hidden shadow-sm`}>
+                        <div className={`absolute top-0 left-0 right-0 h-0.5 ${bar}`} />
+                        <div className={`inline-flex p-2.5 rounded-xl ${bg} mb-4`}>
+                            <Icon size={17} className={accent} />
+                        </div>
+                        <p className="font-heading text-2xl font-black text-foreground leading-none">{value}</p>
+                        <p className="font-ui text-[11px] text-foreground/40 uppercase tracking-widest mt-1.5">{label}</p>
+                    </motion.div>
+                ))}
+            </div>
+
+            {/* ── Backend error ─────────────────────────────────────────── */}
             {fetchError && (
-                <div className="flex items-start gap-3 bg-danger/8 border border-danger/20 text-danger rounded-2xl px-6 py-4">
-                    <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
+                <div className="flex items-start gap-3 bg-danger/5 border border-danger/20 text-danger rounded-2xl px-5 py-4">
+                    <AlertCircle size={17} className="flex-shrink-0 mt-0.5" />
                     <div>
                         <p className="font-ui text-sm font-bold">Backend unreachable</p>
-                        <p className="font-body text-sm opacity-80 mt-0.5">{fetchError}</p>
+                        <p className="font-body text-sm opacity-70 mt-0.5">{fetchError}</p>
                     </div>
                 </div>
             )}
 
-            {/* Openings grid */}
-            {sessionsLoading ? (
-                <div className="flex items-center justify-center py-20 text-slate-500">
-                    <Loader2 size={32} className="animate-spin mr-3" />
-                    <span className="font-ui text-lg">Loading sessions…</span>
+            {/* ── Openings section ──────────────────────────────────────── */}
+            <div>
+                <div className="flex items-center gap-3 mb-5">
+                    <h2 className="font-heading text-xl font-bold text-foreground">Active Openings</h2>
+                    {openings.length > 0 && (
+                        <span className="px-2.5 py-0.5 bg-primary/10 text-primary rounded-full text-xs font-ui font-black">{openings.length}</span>
+                    )}
                 </div>
-            ) : openings.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-24 text-center">
-                    <div className="w-20 h-20 bg-gray-100 rounded-3xl flex items-center justify-center mb-6">
-                        <Briefcase size={36} className="text-foreground/30" />
-                    </div>
-                    <h3 className="font-heading text-2xl font-bold mb-2 text-foreground/50">No sessions yet</h3>
-                    <p className="font-body text-foreground/40 mb-8">Create your first interview session to get started.</p>
-                    <button onClick={() => setIsCreating(true)}
-                        className="flex items-center gap-2 bg-primary text-white font-heading font-bold px-6 py-3 rounded-xl shadow-violet hover:bg-primary/90 transition-all">
-                        <Plus size={20} /> Create Opening
-                    </button>
-                </div>
-            ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {openings.map((job) => (
-                        <motion.div
-                            key={job.id}
-                            whileHover={{ y: -5 }}
-                            className="glass-card p-6 rounded-card border border-white/5 hover:border-primary/30 transition-all cursor-pointer group"
-                            onClick={() => router.push(`/dashboard/openings/${job.id}`)}
-                        >
-                            <div className="flex justify-between items-start mb-6">
-                                <div className="p-3 rounded-lg bg-primary/10 text-primary">
-                                    <Briefcase size={24} />
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <span className="px-3 py-1 rounded-full text-[10px] font-ui font-bold uppercase tracking-widest bg-success/10 text-success">
-                                        Active
-                                    </span>
-                                    <button
-                                        onClick={(e) => { e.stopPropagation(); handleDeleteOpening(job.id); }}
-                                        className="p-1.5 rounded-lg hover:bg-danger/10 text-slate-500 hover:text-danger transition-colors"
-                                        title="Delete opening"
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
-                                </div>
-                            </div>
-                            <h3 className="font-heading text-xl font-bold mb-4 line-clamp-2">{job.title}</h3>
-                            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
-                                <div>
-                                    <p className="font-ui text-[10px] text-slate-500 uppercase tracking-wider mb-1">Candidates</p>
-                                    <div className="flex items-center gap-2">
-                                        <Users size={14} className="text-slate-400" />
-                                        <span className="font-heading text-lg font-bold">{job.sessions.length}</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <p className="font-ui text-[10px] text-slate-500 uppercase tracking-wider mb-1">Avg Fit</p>
-                                    <div className="flex items-center gap-2">
-                                        <Target size={14} className="text-slate-400" />
-                                        <span
-                                            className={`font-heading text-lg font-bold ${
-                                                job.avgScore > 80
-                                                    ? "text-success"
-                                                    : job.avgScore > 60
-                                                        ? "text-warning"
-                                                        : job.avgScore > 0
-                                                            ? "text-danger"
-                                                            : "text-slate-500"
-                                            }`}
-                                        >
-                                            {job.avgScore > 0 ? `${job.avgScore}%` : "—"}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="mt-6 flex items-center justify-between text-slate-400 group-hover:text-primary transition-colors">
-                                <span className="font-ui text-sm font-medium">View Detail</span>
-                                <ChevronRight size={18} className="group-hover:translate-x-1 transition-transform" />
-                            </div>
-                        </motion.div>
-                    ))}
-                </div>
-            )}
 
-            {/* Stats row */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 pt-8">
-                <div className="glass-card p-8 rounded-card relative overflow-hidden h-40 flex flex-col justify-center">
-                    <Activity className="absolute bottom-2 right-2 text-primary/10 w-24 h-24" />
-                    <p className="font-ui text-sm text-slate-500 uppercase tracking-widest mb-2 z-10">Total Candidates</p>
-                    <p className="font-heading text-4xl font-bold z-10 leading-tight">{totalCandidates}</p>
-                </div>
-                <div className="glass-card p-8 rounded-card relative overflow-hidden h-40 flex flex-col justify-center">
-                    <Zap className="absolute bottom-2 right-2 text-warning/10 w-24 h-24" />
-                    <p className="font-ui text-sm text-slate-500 uppercase tracking-widest mb-2 z-10">Active Openings</p>
-                    <p className="font-heading text-4xl font-bold z-10 leading-tight">{openings.length}</p>
-                </div>
-                <div className="glass-card p-8 rounded-card relative overflow-hidden h-40 flex flex-col justify-center">
-                    <Users className="absolute bottom-2 right-2 text-success/10 w-24 h-24" />
-                    <p className="font-ui text-sm text-slate-500 uppercase tracking-widest mb-2 z-10">AI Engine</p>
-                    <p className="font-heading text-2xl font-bold z-10 leading-tight">Vidya AI v3</p>
-                </div>
+                {sessionsLoading ? (
+                    <div className="flex items-center justify-center py-20 gap-3 text-foreground/30">
+                        <Loader2 size={24} className="animate-spin" />
+                        <span className="font-ui text-sm uppercase tracking-widest">Loading…</span>
+                    </div>
+                ) : openings.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-center bg-white border border-dashed border-border rounded-3xl">
+                        <div className="w-14 h-14 bg-primary/5 rounded-2xl flex items-center justify-center mb-4">
+                            <Briefcase size={24} className="text-primary/40" />
+                        </div>
+                        <h3 className="font-heading text-lg font-bold text-foreground/40 mb-1.5">No openings yet</h3>
+                        <p className="font-body text-foreground/30 text-sm mb-5">Create your first interview opening to get started.</p>
+                        <button onClick={() => setIsCreating(true)}
+                            className="flex items-center gap-2 bg-primary text-white font-heading font-bold px-5 py-2.5 rounded-xl shadow-violet text-sm hover:bg-primary/90 transition-all">
+                            <Plus size={15} /> Create Opening
+                        </button>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                        {openings.map((job, idx) => {
+                            const latestDate = job.sessions[0]?.created_at;
+                            const fitPct = job.avgScore;
+                            const fitBar   = fitPct >= 80 ? "bg-emerald-500" : fitPct >= 60 ? "bg-amber-500" : fitPct > 0 ? "bg-red-500" : "bg-gray-200";
+                            const fitText  = fitPct >= 80 ? "text-emerald-600" : fitPct >= 60 ? "text-amber-600" : fitPct > 0 ? "text-red-500" : "text-foreground/25";
+                            return (
+                                <motion.div key={job.id}
+                                    initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * 0.05 }}
+                                    whileHover={{ y: -2, boxShadow: "0 8px 24px -6px rgba(108,99,255,0.15)" }}
+                                    className="bg-white border border-border rounded-2xl overflow-hidden cursor-pointer group transition-all shadow-sm"
+                                    onClick={() => router.push(`/dashboard/openings/${job.id}`)}>
+                                    {/* Accent stripe */}
+                                    <div className="h-1 bg-gradient-to-r from-primary via-violet-400 to-blue-400" />
+                                    <div className="p-6">
+                                        {/* Top row */}
+                                        <div className="flex items-start justify-between mb-4">
+                                            <div className="flex items-center gap-2.5">
+                                                <div className="p-2.5 rounded-xl bg-primary/8 text-primary border border-primary/10">
+                                                    <Briefcase size={16} />
+                                                </div>
+                                                <span className="px-2 py-0.5 rounded-full text-[9px] font-ui font-black uppercase tracking-widest bg-success/10 text-success border border-success/15">Active</span>
+                                            </div>
+                                            <button onClick={(e) => { e.stopPropagation(); handleDeleteOpening(job.id); }}
+                                                className="p-1.5 rounded-lg text-foreground/20 hover:bg-danger/8 hover:text-danger transition-colors opacity-0 group-hover:opacity-100"
+                                                title="Delete opening">
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+
+                                        {/* Title + date */}
+                                        <h3 className="font-heading text-base font-bold text-foreground mb-0.5 line-clamp-2 leading-snug">{job.title}</h3>
+                                        {latestDate && (
+                                            <p className="font-ui text-[11px] text-foreground/30 mb-4">
+                                                {new Date(latestDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                            </p>
+                                        )}
+
+                                        {/* Fit score bar */}
+                                        <div className="mb-4">
+                                            <div className="flex items-center justify-between mb-1.5">
+                                                <span className="font-ui text-[11px] text-foreground/40 uppercase tracking-wider">Avg Fit Score</span>
+                                                <span className={`font-heading font-black text-sm ${fitText}`}>{fitPct > 0 ? `${fitPct}%` : "—"}</span>
+                                            </div>
+                                            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                                <motion.div initial={{ width: 0 }} animate={{ width: `${fitPct}%` }}
+                                                    transition={{ delay: idx * 0.05 + 0.3, duration: 0.7, ease: "easeOut" }}
+                                                    className={`h-full ${fitBar} rounded-full`} />
+                                            </div>
+                                        </div>
+
+                                        {/* Footer */}
+                                        <div className="flex items-center justify-between pt-3.5 border-t border-gray-100">
+                                            <div className="flex items-center gap-1.5">
+                                                <Users size={13} className="text-foreground/30" />
+                                                <span className="font-ui text-sm font-bold text-foreground">{job.sessions.length}</span>
+                                                <span className="font-ui text-xs text-foreground/30">candidate{job.sessions.length !== 1 ? "s" : ""}</span>
+                                            </div>
+                                            <div className="flex items-center gap-1 text-foreground/30 group-hover:text-primary transition-colors">
+                                                <span className="font-ui text-xs font-medium">View Details</span>
+                                                <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
+
+            {/* ── Recent Sessions strip ────────────────────────────────── */}
+            {allSessionsSorted.length > 0 && (
+                <div>
+                    <div className="flex items-center gap-3 mb-5">
+                        <h2 className="font-heading text-xl font-bold text-foreground">Recent Sessions</h2>
+                        <span className="px-2.5 py-0.5 bg-gray-100 text-foreground/40 rounded-full text-xs font-ui font-black">{allSessionsSorted.length}</span>
+                    </div>
+                    <div className="bg-white border border-border rounded-2xl overflow-hidden shadow-sm divide-y divide-gray-100/80">
+                        {allSessionsSorted.slice(0, 8).map((s, i) => {
+                            const fit  = s.ocean_summary?.job_fit_score;
+                            const pred = s.ocean_summary?.success_prediction;
+                            const fitBadge = fit != null
+                                ? fit >= 80 ? "bg-emerald-50 text-emerald-700 border-emerald-100"
+                                : fit >= 60 ? "bg-amber-50 text-amber-700 border-amber-100"
+                                : "bg-red-50 text-red-600 border-red-100"
+                                : "bg-gray-50 text-foreground/30 border-gray-100";
+                            const initials = s.candidate_name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
+                            const avatarColors = ["from-violet-400 to-purple-500","from-blue-400 to-cyan-500","from-emerald-400 to-green-500","from-amber-400 to-orange-500","from-pink-400 to-rose-500"];
+                            return (
+                                <Link key={s.session_id} href={`/dashboard/candidates/${s.session_id}`}
+                                    className="flex items-center gap-4 px-5 py-3.5 hover:bg-gray-50/70 transition-colors group">
+                                    <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${avatarColors[i % avatarColors.length]} flex items-center justify-center flex-shrink-0`}>
+                                        <span className="font-heading font-black text-white text-xs">{initials}</span>
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <p className="font-heading font-bold text-sm text-foreground">{s.candidate_name}</p>
+                                        <p className="font-ui text-[11px] text-foreground/35 truncate capitalize">{s.job_opening_id.replace(/-/g, " ")}</p>
+                                    </div>
+                                    <div className="flex items-center gap-2.5 flex-shrink-0">
+                                        <span className="font-ui text-[11px] text-foreground/25">{new Date(s.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                                        <span className={`px-2.5 py-1 rounded-lg text-xs font-heading font-black border ${fitBadge}`}>
+                                            {fit != null ? `${fit.toFixed(0)}%` : "Pending"}
+                                        </span>
+                                        <ChevronRight size={15} className="text-foreground/15 group-hover:text-primary transition-colors" />
+                                    </div>
+                                </Link>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             {/* ── Creation Overlay ──────────────────────────────────────────── */}
             <AnimatePresence>
@@ -419,8 +487,7 @@ export default function Dashboard() {
 
                         <div className="w-full max-w-3xl mx-auto pt-8">
                             <div className="text-center mb-10">
-                                <span className="font-ui text-primary uppercase tracking-[0.3em] font-bold text-xs mb-3 block">Engine V3.0</span>
-                                <h2 className="font-heading text-4xl font-bold">Initialize AI Interview Pipeline</h2>
+                                <h2 className="font-heading text-4xl font-bold">Set Up New Interview</h2>
                             </div>
 
                             {/* Step 1 — Info + Question Config */}
@@ -560,10 +627,11 @@ export default function Dashboard() {
                                                             <label className="font-ui text-[10px] text-foreground/40 uppercase tracking-widest mb-1 block">Stage</label>
                                                             <select value={mqStage} onChange={e => setMqStage(e.target.value as ManualQuestion["stage"])}
                                                                 className="w-full bg-gray-50 border border-border rounded-xl px-3 py-2.5 font-heading font-bold text-sm text-foreground outline-none focus:border-primary/50">
-                                                                <option value="intro">Intro</option>
+                                                                                <option value="intro">Intro</option>
                                                                 <option value="technical">Technical</option>
                                                                 <option value="behavioral">Behavioral</option>
                                                                 <option value="logical">Logical</option>
+                                                                <option value="situational">Situational</option>
                                                             </select>
                                                         </div>
                                                         <div>

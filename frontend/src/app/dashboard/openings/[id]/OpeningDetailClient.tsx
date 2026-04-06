@@ -28,6 +28,8 @@ interface Candidate {
     candidate_name: string;
     job_opening_id: string;
     login_id?: string;
+    questions?: any[];
+    job_description?: string;
     created_at: string;
     ocean_summary: OceanSummary | null;
 }
@@ -40,6 +42,8 @@ interface ProcessingState {
     stage_label: string;
     stage_done: number;
     stage_total: number;
+    stalled: boolean;
+    stage_age_seconds: number;
 }
 
 // Stage → progress bar percentage
@@ -47,14 +51,14 @@ const STAGE_PCT: Record<string, number> = {
     transcribing:   20,
     scoring:        50,
     finalizing:     75,
-    analyzing_gaze: 90,
+    analyzing_attention: 90,
 };
 
 const STAGE_ICONS: Record<string, React.ReactNode> = {
     transcribing:   <Cpu size={14} />,
     scoring:        <BrainCircuit size={14} />,
     finalizing:     <BrainCircuit size={14} />,
-    analyzing_gaze: <Play size={14} />,
+    analyzing_attention: <Play size={14} />,
 };
 
 interface AddCandidateResult {
@@ -66,10 +70,12 @@ interface AddCandidateResult {
 export default function OpeningDetailClient({ id }: { id: string }) {
     const [candidates, setCandidates]     = useState<Candidate[]>([]);
     const [loading, setLoading]           = useState(true);
+    const [fetchError, setFetchError]     = useState(false);
     const [search, setSearch]             = useState("");
     const [deleting, setDeleting]         = useState<string | null>(null);
     const [processing, setProcessing]     = useState<ProcessingState | null>(null);
     const pollRef                         = useRef<ReturnType<typeof setInterval> | null>(null);
+    const fetchAbortRef                   = useRef<AbortController | null>(null);
 
     // ── Add candidate modal state ─────────────────────────────────────────────
     const [showAddModal, setShowAddModal]   = useState(false);
@@ -80,14 +86,24 @@ export default function OpeningDetailClient({ id }: { id: string }) {
 
     // ── Fetch candidates ──────────────────────────────────────────────────────
     const fetchCandidates = useCallback(async () => {
+        // Cancel any previous in-flight request before starting a new one
+        if (fetchAbortRef.current) fetchAbortRef.current.abort();
+        const controller = new AbortController();
+        fetchAbortRef.current = controller;
+
         try {
-            const res = await fetch(`${API}/opening/${id}/candidates`);
+            const res = await fetch(`${API}/opening/${id}/candidates`, {
+                signal: controller.signal,
+            });
             if (res.ok) {
                 const data = await res.json();
                 setCandidates(data);
+                setFetchError(false);
             }
-        } catch (e) {
-            console.error("[VidyaAI][OpeningDetail] fetchCandidates:", e);
+        } catch (e: unknown) {
+            if (e instanceof Error && e.name === "AbortError") return; // intentional cancel
+            console.error("[Examiney][OpeningDetail] fetchCandidates:", e);
+            setFetchError(true);
         } finally {
             setLoading(false);
         }
@@ -105,21 +121,26 @@ export default function OpeningDetailClient({ id }: { id: string }) {
         return () => clearInterval(timer);
     }, [fetchCandidates]);
 
-    // Clean up poll on unmount
-    useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+    // Clean up poll and in-flight fetch on unmount
+    useEffect(() => () => {
+        if (pollRef.current) clearInterval(pollRef.current);
+        if (fetchAbortRef.current) fetchAbortRef.current.abort();
+    }, []);
 
     // ── Start processing a session ────────────────────────────────────────────
     const handleProcess = async (cand: Candidate) => {
         if (pollRef.current) clearInterval(pollRef.current);
 
         setProcessing({
-            session_id:     cand.session_id,
-            candidate_name: cand.candidate_name,
-            status:         "queued",
-            stage:          "queued",
-            stage_label:    "Queuing pipeline…",
-            stage_done:     0,
-            stage_total:    0,
+            session_id:        cand.session_id,
+            candidate_name:    cand.candidate_name,
+            status:            "queued",
+            stage:             "queued",
+            stage_label:       "Starting…",
+            stage_done:        0,
+            stage_total:       0,
+            stalled:           false,
+            stage_age_seconds: 0,
         });
 
         try {
@@ -130,7 +151,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                 return;
             }
         } catch (err) {
-            setProcessing(p => p ? { ...p, status: "error", stage_label: "Network error starting pipeline." } : null);
+            setProcessing(p => p ? { ...p, status: "error", stage_label: "Network error. Please try again." } : null);
             return;
         }
 
@@ -155,16 +176,18 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                 } else if (data.status === "processing") {
                     setProcessing(p => p ? {
                         ...p,
-                        status:      "processing",
-                        stage:       data.stage       ?? p.stage,
-                        stage_label: data.stage_label ?? p.stage_label,
-                        stage_done:  data.stage_done  ?? p.stage_done,
-                        stage_total: data.stage_total ?? p.stage_total,
+                        status:            "processing",
+                        stage:             data.stage             ?? p.stage,
+                        stage_label:       data.stage_label       ?? p.stage_label,
+                        stage_done:        data.stage_done        ?? p.stage_done,
+                        stage_total:       data.stage_total       ?? p.stage_total,
+                        stalled:           data.stalled           ?? false,
+                        stage_age_seconds: data.stage_age_seconds ?? p.stage_age_seconds,
                     } : null);
                 } else if (data.status === "error") {
                     clearInterval(pollRef.current!);
                     pollRef.current = null;
-                    setProcessing(p => p ? { ...p, status: "error", stage_label: data.detail ?? "Pipeline error." } : null);
+                    setProcessing(p => p ? { ...p, status: "error", stage_label: data.detail ?? "Processing failed. Please try again." } : null);
                 }
             } catch {
                 // ignore transient network error during poll
@@ -187,7 +210,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
             await fetch(`${API}/session/${sessionId}`, { method: "DELETE" });
             setCandidates(prev => prev.filter(c => c.session_id !== sessionId));
         } catch (e) {
-            console.error("[VidyaAI][Delete]", e);
+            console.error("[Examiney][Delete]", e);
             alert("Delete failed — please try again.");
         } finally {
             setDeleting(null);
@@ -203,14 +226,22 @@ export default function OpeningDetailClient({ id }: { id: string }) {
             let questions: unknown[] = [];
             let jobDescription = "";
             if (candidates.length > 0) {
-                try {
-                    const rep = await fetch(`${API}/session/${candidates[0].session_id}/report`);
-                    if (rep.ok) {
-                        const data = await rep.json();
-                        questions      = data.session?.questions      || [];
-                        jobDescription = data.session?.job_description || "";
-                    }
-                } catch { /* proceed without questions */ }
+                // First try to get questions directly from the candidates list (now available via updated SELECT)
+                const firstCand = candidates[0];
+                if (firstCand && 'questions' in firstCand) {
+                    questions = (firstCand as any).questions || [];
+                }
+                // Fallback: fetch full report if questions not in list
+                if (!questions || questions.length === 0) {
+                    try {
+                        const rep = await fetch(`${API}/session/${firstCand.session_id}/report`);
+                        if (rep.ok) {
+                            const data = await rep.json();
+                            questions      = data.session?.questions      || [];
+                            jobDescription = data.session?.job_description || "";
+                        }
+                    } catch { /* proceed without questions */ }
+                }
             }
             const res = await fetch(`${API}/session/create`, {
                 method: "POST",
@@ -232,7 +263,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                 alert(body?.detail?.error ?? "Failed to add candidate.");
             }
         } catch (e) {
-            console.error("[VidyaAI][AddCandidate]", e);
+            console.error("[Examiney][AddCandidate]", e);
             alert("Network error adding candidate.");
         } finally {
             setAddLoading(false);
@@ -270,6 +301,32 @@ export default function OpeningDetailClient({ id }: { id: string }) {
 
     return (
         <div className="space-y-10">
+            {/* ── Backend unreachable banner ────────────────────────────────────── */}
+            <AnimatePresence>
+                {fetchError && (
+                    <motion.div
+                        key="fetch-error-banner"
+                        initial={{ opacity: 0, y: -12 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -12 }}
+                        className="rounded-2xl border border-amber-500/30 bg-amber-500/5 px-5 py-4 flex items-center gap-3"
+                    >
+                        <AlertCircle size={18} className="text-amber-400 shrink-0" />
+                        <p className="text-sm text-amber-300/80">
+                            Could not reach the API server. Make sure the backend is running on{" "}
+                            <code className="font-mono text-amber-300">{API}</code>.
+                            The page will retry automatically.
+                        </p>
+                        <button
+                            onClick={() => { setFetchError(false); fetchCandidates(); }}
+                            className="ml-auto shrink-0 text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1"
+                        >
+                            <RefreshCw size={13} /> Retry
+                        </button>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* ── Processing progress banner ─────────────────────────────────── */}
             <AnimatePresence>
                 {processing && (
@@ -315,13 +372,21 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                             </span>
                                         )}
                                         <p className={`font-ui text-xs
-                                            ${processing.status === "done"  ? "text-success"
-                                            : processing.status === "error" ? "text-danger"
+                                            ${processing.status === "done"    ? "text-success"
+                                            : processing.status === "error"   ? "text-danger"
+                                            : processing.stalled              ? "text-amber-400"
                                             : "text-slate-400"}`}>
-                                            {processing.stage_label}
-                                            {processing.status === "processing" && processing.stage_total > 0 && (
+                                            {processing.stalled
+                                                ? `Still working… (${Math.round(processing.stage_age_seconds / 60)}m elapsed — Whisper is slow on CPU)`
+                                                : processing.stage_label}
+                                            {processing.status === "processing" && !processing.stalled && processing.stage_total > 0 && (
                                                 <span className="ml-2 text-slate-600">
                                                     ({processing.stage_done}/{processing.stage_total})
+                                                </span>
+                                            )}
+                                            {processing.status === "processing" && !processing.stalled && processing.stage_age_seconds > 30 && (
+                                                <span className="ml-2 text-slate-700">
+                                                    {processing.stage_age_seconds}s
                                                 </span>
                                             )}
                                         </p>
@@ -343,7 +408,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
 
             {/* ── Header ────────────────────────────────────────────────────────── */}
             <div className="flex items-center gap-6">
-                <Link href="/dashboard" className="p-3 bg-slate-900 border border-white/10 rounded-xl hover:bg-slate-800 transition-colors">
+                <Link href="/dashboard" className="p-3 bg-white border border-border rounded-xl hover:bg-gray-50 transition-colors text-foreground/50 hover:text-foreground shadow-sm">
                     <ArrowLeft size={20} />
                 </Link>
                 <div>
@@ -352,20 +417,20 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                         <span className="bg-success/10 text-success text-[10px] font-heading font-black tracking-widest px-3 py-1 rounded-full uppercase border border-success/20">ACTIVE</span>
                     </div>
                     <p className="font-body text-slate-500 text-lg flex items-center gap-2">
-                        ID: <span className="text-slate-200">{id}</span>
-                        <span className="w-1.5 h-1.5 rounded-full bg-slate-700" />
+                        ID: <span className="text-foreground font-medium">{id}</span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-border" />
                         <span className="text-primary font-bold">{candidates.length} Total Applicants</span>
                     </p>
                 </div>
                 <div className="ml-auto flex items-center gap-3">
                     <button
                         onClick={() => { setAddResult(null); setAddName(""); setShowAddModal(true); }}
-                        className="flex items-center gap-2 px-4 py-3 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-xl transition-colors text-primary font-ui font-black text-sm"
+                        className="flex items-center gap-2 px-4 py-3 bg-primary/10 hover:bg-primary/20 border border-primary/30 rounded-xl transition-colors text-primary font-ui font-black text-sm shadow-sm"
                         title="Add Candidate">
                         <UserPlus size={18} /> Add Candidate
                     </button>
                     <button onClick={fetchCandidates}
-                        className="p-3 bg-slate-900 border border-white/10 rounded-xl hover:bg-slate-800 transition-colors text-slate-400 hover:text-white"
+                        className="p-3 bg-white border border-border rounded-xl hover:bg-gray-50 transition-colors text-foreground/40 hover:text-foreground shadow-sm"
                         title="Refresh">
                         <RefreshCw size={18} />
                     </button>
@@ -388,14 +453,14 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.9, opacity: 0 }}
                             transition={{ type: "spring", duration: 0.3 }}
-                            className="w-full max-w-md bg-slate-900 border border-white/10 rounded-3xl p-8 shadow-2xl"
+                            className="w-full max-w-md bg-white border border-border rounded-3xl p-8 shadow-2xl"
                         >
                             <div className="flex items-center justify-between mb-6">
                                 <div className="flex items-center gap-3">
                                     <div className="p-2 bg-primary/10 rounded-xl text-primary"><UserPlus size={20} /></div>
                                     <h3 className="font-heading text-xl font-bold">Add Candidate</h3>
                                 </div>
-                                <button onClick={closeAddModal} className="p-2 hover:bg-white/10 rounded-lg text-slate-500 hover:text-white transition-colors">
+                                <button onClick={closeAddModal} className="p-2 hover:bg-gray-100 rounded-lg text-slate-500 hover:text-foreground transition-colors">
                                     <X size={18} />
                                 </button>
                             </div>
@@ -418,7 +483,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                 onKeyDown={e => e.key === "Enter" && !addLoading && handleAddCandidate()}
                                                 placeholder="e.g. John Smith"
                                                 autoFocus
-                                                className="w-full bg-black/30 border border-white/10 rounded-xl py-3 px-4 text-sm font-ui outline-none focus:border-primary/50 transition-all"
+                                                className="w-full bg-gray-50 border border-border rounded-xl py-3 px-4 text-sm font-ui text-foreground placeholder:text-foreground/30 outline-none focus:border-primary/50 transition-all"
                                             />
                                         </div>
                                         <button
@@ -436,22 +501,22 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                         <CheckCircle2 size={20} className="text-success shrink-0" />
                                         <p className="font-ui text-sm text-success font-bold">Candidate created successfully!</p>
                                     </div>
-                                    <p className="font-body text-slate-400 text-xs mb-4 leading-relaxed">
-                                        Share these credentials with <span className="text-white font-bold">{addName}</span>. The password can only be used once.
+                                    <p className="font-body text-slate-500 text-xs mb-4 leading-relaxed">
+                                        Share these credentials with <span className="text-foreground font-bold">{addName}</span>. The password can only be used once.
                                     </p>
                                     <div className="space-y-3 mb-6">
                                         {([
                                             { label: "Login ID",  field: "login_id"  as const, value: addResult.login_id  },
                                             { label: "Password",  field: "password"  as const, value: addResult.password  },
                                         ]).map(({ label, field, value }) => (
-                                            <div key={field} className="flex items-center gap-3 p-4 bg-slate-800/50 border border-white/5 rounded-xl">
+                                            <div key={field} className="flex items-center gap-3 p-4 bg-gray-50 border border-border rounded-xl">
                                                 <div className="flex-1 min-w-0">
                                                     <p className="font-ui text-[10px] text-slate-500 uppercase tracking-widest mb-1">{label}</p>
-                                                    <p className="font-heading font-bold text-base text-white truncate">{value}</p>
+                                                    <p className="font-heading font-bold text-base text-foreground truncate">{value}</p>
                                                 </div>
                                                 <button
                                                     onClick={() => handleCopy(field, value)}
-                                                    className="shrink-0 p-2 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-colors"
+                                                    className="shrink-0 p-2 hover:bg-gray-200 rounded-lg text-slate-400 hover:text-foreground transition-colors"
                                                     title={`Copy ${label}`}
                                                 >
                                                     {copiedField === field
@@ -464,7 +529,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                     <div className="flex gap-3">
                                         <button
                                             onClick={() => { setAddResult(null); setAddName(""); }}
-                                            className="flex-1 py-3 border border-white/10 hover:bg-white/5 rounded-xl font-heading font-bold text-sm text-slate-400 transition-all"
+                                            className="flex-1 py-3 border border-border hover:bg-gray-100 rounded-xl font-heading font-bold text-sm text-foreground/60 transition-all"
                                         >
                                             Add Another
                                         </button>
@@ -485,18 +550,18 @@ export default function OpeningDetailClient({ id }: { id: string }) {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 space-y-8">
                     {/* Search + controls */}
-                    <div className="flex flex-col sm:flex-row gap-4 justify-between items-center bg-slate-900/40 p-4 rounded-2xl border border-white/5 backdrop-blur-md shadow-2xl">
+                    <div className="flex flex-col sm:flex-row gap-4 justify-between items-center bg-white p-4 rounded-2xl border border-border shadow-sm">
                         <div className="relative flex-1 w-full">
-                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-foreground/30" size={18} />
                             <input type="text" placeholder="Search candidates by name…" value={search}
                                 onChange={e => setSearch(e.target.value)}
-                                className="w-full bg-black/30 border border-white/5 rounded-xl py-3 pl-12 pr-4 text-sm font-ui outline-none focus:border-primary/50 transition-all" />
+                                className="w-full bg-gray-50 border border-border rounded-xl py-3 pl-12 pr-4 text-sm font-ui text-foreground placeholder:text-foreground/30 outline-none focus:border-primary/50 transition-all" />
                         </div>
                         <div className="flex gap-3">
-                            <button className="flex items-center gap-2 px-5 py-3 bg-slate-800/50 hover:bg-slate-800 border border-white/5 rounded-xl text-sm font-ui font-bold transition-all">
+                            <button className="flex items-center gap-2 px-5 py-3 bg-gray-50 hover:bg-gray-100 border border-border rounded-xl text-sm font-ui font-bold text-foreground/60 transition-all">
                                 <Filter size={18} /> Filter
                             </button>
-                            <button className="flex items-center gap-2 px-5 py-3 bg-slate-800/50 hover:bg-slate-800 border border-white/5 rounded-xl text-sm font-ui font-bold transition-all">
+                            <button className="flex items-center gap-2 px-5 py-3 bg-gray-50 hover:bg-gray-100 border border-border rounded-xl text-sm font-ui font-bold text-foreground/60 transition-all">
                                 <Download size={18} /> Export
                             </button>
                         </div>
@@ -515,7 +580,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                             </div>
                         ) : (
                             <table className="w-full text-left border-collapse">
-                                <thead className="bg-slate-900/80 border-b border-white/5">
+                                <thead className="bg-gray-50 border-b border-border">
                                     <tr>
                                         <th className="px-8 py-5 font-ui font-black text-[10px] text-slate-500 uppercase tracking-widest">Candidate</th>
                                         <th className="px-8 py-5 font-ui font-black text-[10px] text-slate-500 uppercase tracking-widest text-center">OCEAN Radar</th>
@@ -524,7 +589,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                         <th className="px-8 py-5 font-ui font-black text-[10px] text-slate-500 uppercase tracking-widest text-right">Actions</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-white/5">
+                                <tbody className="divide-y divide-gray-100">
                                     {filtered.map((cand, idx) => {
                                         const fit     = cand.ocean_summary?.job_fit_score ?? 0;
                                         const pred    = cand.ocean_summary?.success_prediction ?? "—";
@@ -540,11 +605,11 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                 {/* Name */}
                                                 <td className="px-8 py-6">
                                                     <Link href={`/dashboard/candidates/${cand.session_id}`} className="flex items-center gap-4">
-                                                        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-white/10 flex items-center justify-center font-heading font-black text-slate-300 transition-transform group-hover:scale-110">
+                                                        <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary/10 to-violet-100 border border-primary/10 flex items-center justify-center font-heading font-black text-primary transition-transform group-hover:scale-110">
                                                             {initials}
                                                         </div>
                                                         <div>
-                                                            <p className="font-heading font-bold text-slate-200 text-lg leading-tight group-hover:text-primary transition-colors">{cand.candidate_name}</p>
+                                                            <p className="font-heading font-bold text-foreground text-lg leading-tight group-hover:text-primary transition-colors">{cand.candidate_name}</p>
                                                             <p className="font-ui text-xs text-slate-500 italic uppercase tracking-wider">
                                                                 {new Date(cand.created_at).toLocaleDateString()}
                                                             </p>
@@ -555,7 +620,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                 {/* OCEAN mini icon */}
                                                 <td className="px-8 py-6">
                                                     <div className="flex justify-center">
-                                                        <div className="w-14 h-14 rounded-full border border-white/10 p-1 bg-slate-900/50 group-hover:border-primary/30 transition-colors">
+                                                        <div className="w-14 h-14 rounded-full border border-border p-1 bg-gray-50 group-hover:border-primary/30 transition-colors">
                                                             <div className="w-full h-full rounded-full bg-primary/20 flex items-center justify-center">
                                                                 <BrainCircuit size={20} className="text-primary opacity-60 group-hover:opacity-100 transition-opacity" />
                                                             </div>
@@ -584,7 +649,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                         <span className={`text-[10px] font-heading font-bold px-3 py-1 rounded-lg border uppercase tracking-widest
                                                             ${pred === "High"   ? "text-success border-success/20 bg-success/10"
                                                             : pred === "Medium" ? "text-warning border-warning/20 bg-warning/10"
-                                                            : "text-slate-400 border-white/10 bg-white/5"}`}>
+                                                            : "text-foreground/40 border-border bg-gray-50"}`}>
                                                             {pred}
                                                         </span>
                                                     ) : (
@@ -596,7 +661,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                 <td className="px-8 py-6 text-right">
                                                     <div className="flex items-center justify-end gap-2">
                                                         <Link href={`/dashboard/candidates/${cand.session_id}`}
-                                                            className="p-2 hover:bg-white/10 rounded-lg transition-colors text-slate-500 hover:text-white"
+                                                            className="p-2 hover:bg-primary/8 rounded-lg transition-colors text-slate-500 hover:text-primary"
                                                             title="View Report">
                                                             <ChevronRight size={20} />
                                                         </Link>
@@ -608,7 +673,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                                             title={cand.ocean_summary ? "Re-process" : "Process Interview"}
                                                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-[10px] font-ui font-black uppercase tracking-widest border disabled:opacity-40 disabled:cursor-not-allowed
                                                                 ${cand.ocean_summary
-                                                                    ? "text-slate-400 border-white/10 hover:bg-white/10 hover:text-white"
+                                                                    ? "text-foreground/40 border-border hover:bg-gray-100 hover:text-foreground"
                                                                     : "text-primary border-primary/30 bg-primary/10 hover:bg-primary/20"}`}>
                                                             {isProcessingThis
                                                                 ? <><Loader2 size={12} className="animate-spin" /> Running</>
@@ -660,7 +725,7 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                             <p className="font-ui text-xs text-slate-400 uppercase tracking-widest font-black">{label}</p>
                                             <p className="font-heading font-bold text-sm">{value}/{total}</p>
                                         </div>
-                                        <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                                        <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
                                             <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
                                         </div>
                                     </div>
@@ -670,9 +735,9 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                     </div>
 
                     {/* Avg trait heatmap */}
-                    <div className="glass-card p-8 rounded-3xl border border-white/10 shadow-2xl bg-gradient-to-br from-slate-900 to-slate-950">
+                    <div className="glass-card p-8 rounded-3xl border border-border shadow-sm">
                         <div className="flex items-center gap-3 mb-6">
-                            <div className="p-2 rounded-xl bg-violet-500/10 text-violet-400"><PieChart size={20} /></div>
+                            <div className="p-2 rounded-xl bg-violet-500/10 text-violet-600"><PieChart size={20} /></div>
                             <h4 className="font-heading text-xl font-bold italic tracking-tight">Avg Trait Heatmap</h4>
                         </div>
                         <div className="grid grid-cols-2 gap-4">
@@ -681,9 +746,9 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                                 const avg  = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
                                 const label = avg === null ? "—" : avg >= 65 ? "HIGH" : avg >= 40 ? "MOD" : "LOW";
                                 return (
-                                    <div key={trait} className="p-5 rounded-2xl bg-white/5 border border-white/5 text-center">
+                                    <div key={trait} className="p-5 rounded-2xl bg-gray-50 border border-border text-center">
                                         <p className="font-ui text-[10px] text-slate-500 uppercase tracking-widest mb-1 capitalize">{trait}</p>
-                                        <p className={`font-heading text-2xl font-black leading-none ${label === "HIGH" ? "text-primary" : "text-slate-200"}`}>{label}</p>
+                                        <p className={`font-heading text-2xl font-black leading-none ${label === "HIGH" ? "text-primary" : "text-foreground/60"}`}>{label}</p>
                                     </div>
                                 );
                             })}
@@ -694,13 +759,10 @@ export default function OpeningDetailClient({ id }: { id: string }) {
                     {candidates.filter(c => !c.ocean_summary).length > 0 && (
                         <div className="glass-card p-6 rounded-3xl border border-warning/20 bg-warning/5">
                             <p className="font-ui text-xs text-warning uppercase tracking-widest font-black mb-3">
-                                {candidates.filter(c => !c.ocean_summary).length} candidate(s) not yet processed
+                                {candidates.filter(c => !c.ocean_summary).length} candidate(s) pending review
                             </p>
-                            <p className="text-slate-400 text-xs font-body mb-4 leading-relaxed">
-                                Use the Process button per row to run the AI analysis pipeline individually.
-                            </p>
-                            <p className="text-slate-600 text-[10px] font-ui uppercase tracking-widest">
-                                Pipeline: Whisper → OCEAN → GazeFollower
+                            <p className="text-slate-400 text-xs font-body leading-relaxed">
+                                Click the &ldquo;Process&rdquo; button next to each candidate to generate their assessment report.
                             </p>
                         </div>
                     )}

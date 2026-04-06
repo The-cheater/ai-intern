@@ -21,4 +21,7 @@ RUN mkdir -p outputs/calibration outputs/session
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Single worker: Whisper and SentenceTransformer are process-local singletons.
+# Multiple workers bypass _whisper_lock and each load their own model copy (~1 GB each).
+# To scale horizontally use a task queue (Celery/ARQ) or a dedicated transcription service.
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
